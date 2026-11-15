@@ -37,6 +37,15 @@ export interface PairingPayload {
   spoken_response: string;
 }
 
+export interface DetectionItem {
+  label: string;
+  confidence: number;
+  is_personal_match: boolean;
+  object_id: string | null;
+  position: string;
+  box: { x1: number; y1: number; x2: number; y2: number };
+}
+
 export interface DiagnosticsPayload {
   uptime_seconds: number;
   camera_id: string | null;
@@ -124,7 +133,7 @@ export const api = {
       { method: "POST" }
     ),
   describeScene: () =>
-    request<{ spoken_response: string; detections: unknown[] }>("/api/v1/vision/describe", {
+    request<{ spoken_response: string; detections: DetectionItem[] }>("/api/v1/vision/describe", {
       method: "POST"
     }),
   readText: () =>
@@ -154,10 +163,13 @@ export const api = {
   clearAllMemory: () =>
     request<{ cleared: boolean; spoken_response: string }>("/api/v1/memory", { method: "DELETE" }),
   sendCommand: (text: string) =>
-    request<{ intent: string; spoken_response: string }>("/api/v1/commands", {
-      method: "POST",
-      body: JSON.stringify({ text })
-    }),
+    request<{ intent: string; spoken_response: string; detections?: DetectionItem[] }>(
+      "/api/v1/commands",
+      {
+        method: "POST",
+        body: JSON.stringify({ text })
+      }
+    ),
   createPairing: () => request<PairingPayload>("/api/v1/pairing/create", { method: "POST" }),
   pairingStatus: (token: string) =>
     request<{ state: string; camera_source_id: string | null }>(`/api/v1/pairing/status/${token}`),

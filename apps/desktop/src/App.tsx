@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   getApiBase,
   setApiBase,
   type CameraInfo,
+  type DetectionItem,
   type DiagnosticsPayload,
   type LearnedObject,
   type ObservationItem,
@@ -30,7 +31,7 @@ interface SpeechRecognitionLike {
 
 export function App() {
   const [cameras, setCameras] = useState<CameraInfo[]>([]);
-  const [selectedCamera, setSelectedCamera] = useState<string>("mock-cam-0");
+  const [selectedCamera, setSelectedCamera] = useState<string>("webcam-0");
   const [cameraStatus, setCameraStatus] = useState<string>("stopped");
   const [announcement, setAnnouncement] = useState<string>(
     "Vistara Vision is ready. Press Start Vision or use the voice command bar."
@@ -38,6 +39,8 @@ export function App() {
   const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
   const [speechRate, setSpeechRate] = useState<number>(1.0);
   const [listening, setListening] = useState<boolean>(false);
+  const [continuousMic, setContinuousMic] = useState<boolean>(false);
+  const [lastHeard, setLastHeard] = useState<string>("");
   const [commandText, setCommandText] = useState<string>("");
 
   const [teachLabel, setTeachLabel] = useState<string>("");
@@ -48,10 +51,12 @@ export function App() {
   const [observations, setObservations] = useState<ObservationItem[]>([]);
 
   const [pairing, setPairing] = useState<PairingPayload | null>(null);
-  const [showPreview, setShowPreview] = useState<boolean>(false);
+  const [showPreview, setShowPreview] = useState<boolean>(true);
   const [previewTick, setPreviewTick] = useState<number>(0);
+  const [detections, setDetections] = useState<DetectionItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   const speak = useCallback(
     (text: string) => {
@@ -142,15 +147,17 @@ export function App() {
     }
   };
 
-  const handleDescribe = async () => {
+  const handleDescribe = useCallback(async () => {
     try {
       const res = await api.describeScene();
+      setDetections(res.detections ?? []);
+      setPreviewTick((t) => t + 1);
       speak(res.spoken_response);
       await refreshLists();
     } catch (err) {
       speak(err instanceof Error ? err.message : "Could not describe scene.");
     }
-  };
+  }, [refreshLists, speak]);
 
   const handleReadText = async () => {
     try {
@@ -201,38 +208,87 @@ export function App() {
     }
   };
 
-  const handleCommandSubmit = async (textToSend: string) => {
-    if (!textToSend.trim()) return;
-    try {
-      const res = await api.sendCommand(textToSend.trim());
-      setCommandText("");
-      speak(res.spoken_response);
-      await refreshLists();
-    } catch (err) {
-      speak(err instanceof Error ? err.message : "Command failed.");
-    }
-  };
+  const handleCommandSubmit = useCallback(
+    async (textToSend: string) => {
+      if (!textToSend.trim()) return;
+      try {
+        const res = await api.sendCommand(textToSend.trim());
+        setCommandText("");
+        if (res.detections) {
+          setDetections(res.detections);
+        }
+        setPreviewTick((t) => t + 1);
+        speak(res.spoken_response);
+        await refreshLists();
+      } catch (err) {
+        speak(err instanceof Error ? err.message : "Command failed.");
+      }
+    },
+    [refreshLists, speak]
+  );
 
-  const handleVoiceMic = () => {
+  const startVoiceRecognition = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      speak("Browser speech recognition is unavailable. Please type your command in the command box.");
+      speak("Browser speech recognition is unavailable. Use Chrome or Edge, or type in the command box.");
+      return;
+    }
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+      setListening(false);
       return;
     }
     const rec = new SR();
     rec.lang = "en-IN";
     rec.interimResults = false;
     rec.maxAlternatives = 1;
+    recognitionRef.current = rec;
     setListening(true);
+
     rec.onresult = (ev) => {
       const transcript = ev.results[0]?.[0]?.transcript ?? "";
-      setCommandText(transcript);
-      void handleCommandSubmit(transcript);
+      if (transcript.trim()) {
+        setLastHeard(transcript);
+        setCommandText(transcript);
+        void handleCommandSubmit(transcript);
+      }
     };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
+    rec.onerror = (ev) => {
+      setListening(false);
+      recognitionRef.current = null;
+      if (ev.error === "not-allowed") {
+        setContinuousMic(false);
+        speak("Microphone permission was denied. Please allow microphone access in your browser.");
+      }
+    };
+    rec.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+      if (continuousMic) {
+        window.setTimeout(() => {
+          startVoiceRecognition();
+        }, 400);
+      }
+    };
     rec.start();
-  };
+  }, [continuousMic, handleCommandSubmit, speak]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "m") {
+        e.preventDefault();
+        startVoiceRecognition();
+      } else if (key === "d") {
+        e.preventDefault();
+        void handleDescribe();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleDescribe, startVoiceRecognition]);
 
   const handleCreatePairing = async () => {
     try {
@@ -299,10 +355,34 @@ export function App() {
         <button type="submit" className="btn btn-primary">
           Run Command
         </button>
-        <button type="button" className="btn" onClick={handleVoiceMic}>
-          {listening ? "Listening..." : "Speak (Mic)"}
+        <button
+          type="button"
+          className={`btn ${listening ? "btn-mic-active" : ""}`}
+          onClick={startVoiceRecognition}
+          title="Shortcut: Alt+M"
+        >
+          {listening ? "Listening... (Click to Stop)" : "Speak (Alt+M)"}
         </button>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <input
+            type="checkbox"
+            checked={continuousMic}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setContinuousMic(checked);
+              if (checked && !listening) {
+                startVoiceRecognition();
+              }
+            }}
+          />
+          Hands-free
+        </label>
       </form>
+      {lastHeard && (
+        <p className="muted" style={{ marginTop: "-0.75rem", marginBottom: "1rem" }}>
+          Last heard: <strong>&ldquo;{lastHeard}&rdquo;</strong>
+        </p>
+      )}
 
       <main className="grid-4">
         {/* 1. Start Vision */}
@@ -345,11 +425,44 @@ export function App() {
             Show visual preview (for sighted helper)
           </label>
           {showPreview && cameraStatus === "active" && (
-            <img
-              className="preview-img"
-              src={`${getApiBase()}/api/v1/cameras/preview?t=${previewTick}`}
-              alt="Live camera preview"
-            />
+            <div className="preview-container">
+              <img
+                className="preview-img"
+                src={`${getApiBase()}/api/v1/cameras/preview?t=${previewTick}`}
+                alt="Live camera preview showing what Vistara Vision sees"
+              />
+              <svg className="preview-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+                {detections.map((d, idx) => {
+                  const x = d.box.x1 * 100;
+                  const y = d.box.y1 * 100;
+                  const w = Math.max(2, (d.box.x2 - d.box.x1) * 100);
+                  const h = Math.max(2, (d.box.y2 - d.box.y1) * 100);
+                  const color = d.is_personal_match ? "#22c55e" : "#38bdf8";
+                  return (
+                    <g key={`${d.label}-${idx}`}>
+                      <rect
+                        x={x}
+                        y={y}
+                        width={w}
+                        height={h}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth="0.9"
+                      />
+                      <text
+                        x={x + 1}
+                        y={Math.max(5, y - 1.5)}
+                        fill={color}
+                        fontSize="4.2"
+                        fontWeight="bold"
+                      >
+                        {d.label} ({Math.round(d.confidence * 100)}%)
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
           )}
         </section>
 
