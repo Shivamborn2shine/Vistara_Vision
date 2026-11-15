@@ -63,6 +63,7 @@ export function App() {
   const browserTimerRef = useRef<number | null>(null);
   const hiddenVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const announcedPairingTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     continuousMicRef.current = continuousMic;
@@ -144,29 +145,6 @@ export function App() {
     return () => window.clearInterval(id);
   }, [showPreview, cameraStatus, selectedCamera]);
 
-  useEffect(() => {
-    if (!pairing) return;
-    const id = window.setInterval(async () => {
-      try {
-        const st = await api.pairingStatus(pairing.token);
-        if (st.state === "connected") {
-          setPairing((prev) => (prev ? { ...prev, state: "connected" } : null));
-          if (st.camera_source_id) {
-            setSelectedCamera(st.camera_source_id);
-          }
-          setCameraStatus("active");
-          setPreviewTick((t) => t + 1);
-          speak("Phone camera connected and active.");
-          void refreshLists();
-          window.clearInterval(id);
-        }
-      } catch {
-        window.clearInterval(id);
-      }
-    }, 1500);
-    return () => window.clearInterval(id);
-  }, [pairing, refreshLists, speak]);
-
   const stopBrowserStream = useCallback(() => {
     if (browserTimerRef.current !== null) {
       window.clearInterval(browserTimerRef.current);
@@ -177,6 +155,34 @@ export function App() {
       browserStreamRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    if (!pairing || pairing.state === "connected") return;
+    const token = pairing.token;
+    const id = window.setInterval(async () => {
+      try {
+        const st = await api.pairingStatus(token);
+        if (st.state === "connected") {
+          window.clearInterval(id);
+          stopBrowserStream();
+          setPairing((prev) => (prev ? { ...prev, state: "connected" } : null));
+          if (st.camera_source_id) {
+            setSelectedCamera(st.camera_source_id);
+          }
+          setCameraStatus("active");
+          setPreviewTick((t) => t + 1);
+          if (announcedPairingTokenRef.current !== token) {
+            announcedPairingTokenRef.current = token;
+            speak("Phone camera connected and active.");
+          }
+          void refreshLists();
+        }
+      } catch {
+        window.clearInterval(id);
+      }
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [pairing?.token, pairing?.state, refreshLists, speak, stopBrowserStream]);
 
   const startBrowserWebcam = useCallback(async (): Promise<boolean> => {
     if (!navigator.mediaDevices?.getUserMedia) {
