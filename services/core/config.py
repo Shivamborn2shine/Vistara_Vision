@@ -22,9 +22,16 @@ class Settings(BaseSettings):
     db_filename: str = "vistara_memory.sqlite3"
     pairing_ttl_seconds: int = 180
     cloud_vision_enabled: bool = False
+    gemini_api_key: str | None = os.environ.get("GEMINI_API_KEY") or None
+    gemini_model: str = "gemini-2.5-flash"
     host: str = "127.0.0.1"
     port: int = 8765
     public_url: str | None = None
+
+    @property
+    def ai_config_path(self) -> Path:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        return self.data_dir / "gemini_config.json"
 
     @property
     def db_path(self) -> Path:

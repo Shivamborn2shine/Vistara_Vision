@@ -15,7 +15,10 @@ dist/
 dist-ssr/
 *.local
 
-# Local data & models
+# Local data & models & secrets
+.env
+.env.*
+!.env.example
 *.db
 *.sqlite
 *.sqlite3

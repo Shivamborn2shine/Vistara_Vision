@@ -64,6 +64,9 @@ export function App() {
   const [previewTick, setPreviewTick] = useState<number>(0);
   const [detections, setDetections] = useState<DetectionItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
+  const [geminiConfigured, setGeminiConfigured] = useState<boolean>(false);
+  const [geminiModel, setGeminiModel] = useState<string>("gemini-2.5-flash");
+  const [geminiKeyInput, setGeminiKeyInput] = useState<string>("");
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const pttActiveRef = useRef<boolean>(false);
@@ -123,17 +126,22 @@ export function App() {
 
   const refreshLists = useCallback(async () => {
     try {
-      const [cams, objs, obs, diag] = await Promise.all([
+      const [cams, objs, obs, diag, aiCfg] = await Promise.all([
         api.listCameras(),
         api.listObjects(),
         api.listObservations(),
-        api.diagnostics()
+        api.diagnostics(),
+        api.getAiConfig().catch(() => null)
       ]);
       setCameras(cams);
       setLearnedObjects(objs);
       setObservations(obs);
       setDiagnostics(diag);
       setCameraStatus(diag.camera_status);
+      if (aiCfg) {
+        setGeminiConfigured(aiCfg.configured);
+        setGeminiModel(aiCfg.model);
+      }
     } catch (err) {
       speak(err instanceof Error ? err.message : "Could not reach local Vistara service.");
     }
@@ -1160,6 +1168,52 @@ export function App() {
           <button type="submit" className="btn">
             Save &amp; Reconnect
           </button>
+        </form>
+        <form
+          className="btn-row"
+          style={{ alignItems: "center", marginTop: "0.5rem" }}
+          onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              const res = await api.setAiConfig(geminiKeyInput.trim(), geminiModel);
+              setGeminiConfigured(res.configured);
+              setGeminiModel(res.model);
+              setGeminiKeyInput("");
+              speak(
+                res.configured
+                  ? `Gemini Vision connected using ${res.model}.`
+                  : "Gemini Vision key cleared."
+              );
+            } catch (err) {
+              speak(err instanceof Error ? err.message : "Could not save Gemini API key.");
+            }
+          }}
+        >
+          <label htmlFor="gemini-key-input" className="muted">
+            Gemini Vision API Key:
+          </label>
+          <input
+            id="gemini-key-input"
+            type="password"
+            value={geminiKeyInput}
+            onChange={(e) => setGeminiKeyInput(e.target.value)}
+            placeholder={geminiConfigured ? "Saved (paste new key to replace)" : "AIza..."}
+            style={{ minWidth: "220px" }}
+          />
+          <select
+            aria-label="Gemini model"
+            value={geminiModel}
+            onChange={(e) => setGeminiModel(e.target.value)}
+          >
+            <option value="gemini-2.5-flash">gemini-2.5-flash (Fast)</option>
+            <option value="gemini-2.5-pro">gemini-2.5-pro (Smartest)</option>
+          </select>
+          <button type="submit" className="btn btn-primary">
+            Save Gemini Key
+          </button>
+          <span className="muted">
+            Status: {geminiConfigured ? `Connected (${geminiModel})` : "Not configured"}
+          </span>
         </form>
       </footer>
     </div>

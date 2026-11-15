@@ -59,3 +59,52 @@ def test_general_voice_commands(tmp_path: Path) -> None:
     r_light = client.post("/api/v1/commands", json={"text": "How is the light?"})
     assert r_light.status_code == 200
     assert r_light.json()["intent"] == "check_lighting"
+
+
+def test_gemini_vision_config_and_open_ended_command_routing(tmp_path: Path, monkeypatch) -> None:
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "There is a blue water bottle in front of you."}]
+                        }
+                    }
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def post(self, *args, **kwargs) -> _FakeResponse:
+            return _FakeResponse()
+
+    import packages.vision.gemini_vision as gv
+
+    monkeypatch.setattr(gv.httpx, "Client", _FakeClient)
+
+    app = create_app(Settings(data_dir=tmp_path))
+    client = TestClient(app)
+
+    assert client.get("/api/v1/ai/config").json()["configured"] is False
+    cfg = client.post(
+        "/api/v1/ai/config", json={"api_key": "test-key-123", "model": "gemini-2.5-flash"}
+    )
+    assert cfg.status_code == 200
+    assert cfg.json()["configured"] is True
+
+    client.post("/api/v1/cameras/start", json={"source_id": "mock-cam-0"})
+    r_cmd = client.post("/api/v1/commands", json={"text": "What medicine bottle am I holding?"})
+    assert r_cmd.status_code == 200
+    assert r_cmd.json()["intent"] == "ai_vision"
+    assert "blue water bottle" in r_cmd.json()["spoken_response"].lower()

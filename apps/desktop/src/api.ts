@@ -187,5 +187,16 @@ export const api = {
     request<{ state: string; camera_source_id: string | null }>(`/api/v1/pairing/status/${token}`),
   disconnectPairing: (token: string) =>
     request<{ disconnected: boolean }>(`/api/v1/pairing/disconnect/${token}`, { method: "POST" }),
-  diagnostics: () => request<DiagnosticsPayload>("/api/v1/diagnostics")
+  diagnostics: () => request<DiagnosticsPayload>("/api/v1/diagnostics"),
+  getAiConfig: () => request<{ configured: boolean; model: string }>("/api/v1/ai/config"),
+  setAiConfig: (apiKey: string, model?: string) =>
+    request<{ configured: boolean; model: string }>("/api/v1/ai/config", {
+      method: "POST",
+      body: JSON.stringify({ api_key: apiKey, model: model || null })
+    }),
+  askAi: (question: string) =>
+    request<{ spoken_response: string; model: string; ok: boolean }>("/api/v1/vision/ask", {
+      method: "POST",
+      body: JSON.stringify({ question })
+    })
 };

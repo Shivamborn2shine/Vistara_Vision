@@ -25,7 +25,7 @@ from packages.memory.repository import MemoryRepository
 from packages.speech.commands import CommandIntent, parse_voice_command
 from packages.vision.camera import CameraManager, PhoneStreamCameraSource
 from packages.vision.coco_labels import OBJECT_KNOWLEDGE_HINTS
-from packages.vision.contracts import CameraInfo, CameraStatus, Detection
+from packages.vision.contracts import CameraFrame, CameraInfo, CameraStatus, Detection
 from packages.vision.currency import INRCurrencyAnalyzer
 from packages.vision.detector import (
     OnnxCocoObjectDetector,
@@ -33,6 +33,7 @@ from packages.vision.detector import (
     describe_relative_position,
 )
 from packages.vision.encoder import LocalHistogramVisualEncoder
+from packages.vision.gemini_vision import GeminiVisionAssistant
 from packages.vision.ocr import LocalOCREngine
 from packages.vision.pipeline import BoundedFrameQueue, PerceptionPipeline
 from packages.vision.spatial import describe_dominant_color, narrate_scene
@@ -74,6 +75,15 @@ class PublicUrlRequest(BaseModel):
     public_url: str | None = None
 
 
+class AiConfigRequest(BaseModel):
+    api_key: str = Field(default="", max_length=256)
+    model: str | None = Field(default=None, max_length=80)
+
+
+class AskAiRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
 class AppContainer:
     """Holds modular services for the Vistara Vision local monolith."""
 
@@ -84,6 +94,11 @@ class AppContainer:
         self.encoder = LocalHistogramVisualEncoder()
         self.currency = INRCurrencyAnalyzer()
         self.ocr = LocalOCREngine()
+        self.gemini = GeminiVisionAssistant(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            config_path=settings.ai_config_path,
+        )
         self.pipeline = PerceptionPipeline(
             detector=self.detector,
             encoder=self.encoder,
@@ -434,6 +449,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             c.memory.write_observation(obs, label_source=source)
 
         spoken = narrate_scene(detections, lighting_warning=lighting_issue)
+        if c.gemini.configured:
+            known_names = [o.label for o in c.memory.list_objects()]
+            reply = c.gemini.ask(
+                "Describe clearly what is in front of me right now.",
+                frame=frame,
+                known_objects=known_names,
+            )
+            if reply.ok:
+                spoken = reply.text
 
         c.last_spoken_response = spoken
         return {
@@ -450,6 +474,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
                 for d in detections
             ],
+        }
+
+    @app.get("/api/v1/ai/config")
+    def get_ai_config() -> dict[str, Any]:
+        return {"configured": c.gemini.configured, "model": c.gemini.model}
+
+    @app.post("/api/v1/ai/config")
+    def set_ai_config(req: AiConfigRequest) -> dict[str, Any]:
+        c.gemini.configure(req.api_key, model=req.model)
+        return {"configured": c.gemini.configured, "model": c.gemini.model}
+
+    @app.post("/api/v1/vision/ask")
+    def ask_ai_vision(req: AskAiRequest) -> dict[str, Any]:
+        frame: CameraFrame | None = None
+        if c.camera_manager.active_status() == CameraStatus.ACTIVE:
+            frame = c.camera_manager.capture_frame()
+        known_names = [o.label for o in c.memory.list_objects()]
+        reply = c.gemini.ask(req.question, frame=frame, known_objects=known_names)
+        c.last_spoken_response = reply.text
+        return {
+            "spoken_response": reply.text,
+            "model": reply.model,
+            "ok": reply.ok,
+            "error_reason": reply.error_reason,
         }
 
     @app.post("/api/v1/vision/ocr")
@@ -764,9 +812,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             return {"intent": intent.value, "spoken_response": msg}
 
+        if c.gemini.configured:
+            ai_frame: CameraFrame | None = None
+            if c.camera_manager.active_status() == CameraStatus.ACTIVE:
+                ai_frame = c.camera_manager.capture_frame()
+            known_names = [o.label for o in c.memory.list_objects()]
+            reply = c.gemini.ask(req.text, frame=ai_frame, known_objects=known_names)
+            c.last_spoken_response = reply.text
+            return {
+                "intent": "ai_vision",
+                "spoken_response": reply.text,
+                "model": reply.model,
+                "ok": reply.ok,
+            }
+
         msg = (
-            "I did not understand that command. Say Help to hear everything I can do, or try: "
-            "What is in front of me, Count these notes, or Where was my keys."
+            "I did not understand that command. Say Help to hear everything I can do, or add "
+            "a Gemini API key in Settings to ask any general or visual AI question."
         )
         return {"intent": CommandIntent.UNKNOWN.value, "spoken_response": msg}
 
