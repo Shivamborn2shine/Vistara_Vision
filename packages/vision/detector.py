@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
 
+from packages.vision.coco_labels import MSCOCO_90_LABELS
 from packages.vision.contracts import BoundingBox, CameraFrame, Detection
 
 
@@ -150,3 +152,90 @@ class HeuristicObjectDetector:
         if luma < 0.25:
             return "dark object"
         return "foreground object"
+
+
+DEFAULT_ONNX_MODEL_PATH = (
+    Path(__file__).resolve().parents[2] / "models" / "weights" / "ssd_mobilenet_v1_12.onnx"
+)
+
+
+class OnnxCocoObjectDetector:
+    """
+    Pre-trained 80-class COCO object detector powered by ONNX Runtime CPU.
+
+    Detects and draws individual bounding boxes around people, phones, bottles,
+    cups, laptops, books, chairs, keyboards, etc. Falls back cleanly to
+    HeuristicObjectDetector if onnxruntime or the model weights are unavailable.
+    """
+
+    model_version = "ssd-mobilenet-v1-coco-onnx"
+
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        score_threshold: float = 0.42,
+    ) -> None:
+        self.model_path = model_path or DEFAULT_ONNX_MODEL_PATH
+        self.score_threshold = score_threshold
+        self._session: Any = None
+        self._input_name: str = "inputs"
+        self._fallback = HeuristicObjectDetector()
+        self._init_session()
+
+    def _init_session(self) -> None:
+        if not self.model_path.exists():
+            return
+        try:
+            import onnxruntime as ort  # type: ignore[import-not-found]
+
+            self._session = ort.InferenceSession(
+                str(self.model_path),
+                providers=["CPUExecutionProvider"],
+            )
+            self._input_name = self._session.get_inputs()[0].name
+        except Exception:
+            self._session = None
+
+    def detect(self, frame: CameraFrame) -> list[Detection]:
+        if self._session is None:
+            return self._fallback.detect(frame)
+
+        img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("RGB")
+        # Resize to 320x240 for fast ~35ms CPU inference while preserving aspect
+        resized = img.resize((320, 240), Image.Resampling.BILINEAR)
+        arr = np.expand_dims(np.asarray(resized, dtype=np.uint8), axis=0)
+
+        boxes, classes, scores, num_det = self._session.run(None, {self._input_name: arr})
+        count = int(num_det[0]) if len(num_det) else len(scores[0])
+
+        detections: list[Detection] = []
+        for i in range(min(count, len(scores[0]))):
+            score = float(scores[0][i])
+            if score < self.score_threshold:
+                continue
+            cls_id = int(classes[0][i])
+            label = MSCOCO_90_LABELS.get(cls_id, f"object-{cls_id}")
+            ymin, xmin, ymax, xmax = [float(v) for v in boxes[0][i]]
+            x1 = max(0.0, min(1.0, xmin))
+            y1 = max(0.0, min(1.0, ymin))
+            x2 = max(x1 + 0.01, min(1.0, xmax))
+            y2 = max(y1 + 0.01, min(1.0, ymax))
+            detections.append(
+                Detection(
+                    label=label,
+                    box=BoundingBox(
+                        x1=round(x1, 3),
+                        y1=round(y1, 3),
+                        x2=round(x2, 3),
+                        y2=round(y2, 3),
+                    ),
+                    confidence=round(score, 3),
+                    model_version=self.model_version,
+                    track_id=f"{label}-{i}",
+                )
+            )
+
+        if not detections:
+            return self._fallback.detect(frame)
+
+        return detections

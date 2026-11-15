@@ -21,10 +21,11 @@ from packages.memory.answering import MemoryAnswerEngine
 from packages.memory.repository import MemoryRepository
 from packages.speech.commands import CommandIntent, parse_voice_command
 from packages.vision.camera import CameraManager, PhoneStreamCameraSource
+from packages.vision.coco_labels import OBJECT_KNOWLEDGE_HINTS
 from packages.vision.contracts import CameraInfo, CameraStatus
 from packages.vision.currency import INRCurrencyAnalyzer
 from packages.vision.detector import (
-    HeuristicObjectDetector,
+    OnnxCocoObjectDetector,
     assess_frame_lighting,
     describe_relative_position,
 )
@@ -71,11 +72,15 @@ class AppContainer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.camera_manager = CameraManager()
-        self.detector = HeuristicObjectDetector()
+        self.detector = OnnxCocoObjectDetector()
         self.encoder = LocalHistogramVisualEncoder()
         self.currency = INRCurrencyAnalyzer()
         self.ocr = LocalOCREngine()
-        self.pipeline = PerceptionPipeline(detector=self.detector, encoder=self.encoder)
+        self.pipeline = PerceptionPipeline(
+            detector=self.detector,
+            encoder=self.encoder,
+            min_confidence=0.42,
+        )
         self.frame_queue = BoundedFrameQueue(maxsize=2)
         self.memory = MemoryRepository(db_path=settings.db_path)
         self.answering = MemoryAnswerEngine(repo=self.memory)
@@ -350,10 +355,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif not detections:
             spoken = "I do not see any distinct objects clearly in front of the camera. Try panning slowly."
         else:
-            parts = [
-                f"{d.label} ({describe_relative_position(d.box)}, {int(d.confidence * 100)}% confidence)"
-                for d in detections[:4]
-            ]
+            parts = []
+            for d in detections[:5]:
+                hint = OBJECT_KNOWLEDGE_HINTS.get(d.label, "")
+                hint_suffix = f" ({hint})" if hint else ""
+                parts.append(
+                    f"{d.label} ({describe_relative_position(d.box)}, {int(d.confidence * 100)}% confidence){hint_suffix}"
+                )
             spoken = "In front of you, I see: " + "; ".join(parts) + "."
 
         c.last_spoken_response = spoken

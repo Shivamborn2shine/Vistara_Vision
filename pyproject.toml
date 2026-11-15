@@ -48,5 +48,5 @@ warn_unused_configs = true
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["qrcode", "rapidocr_onnxruntime", "pytesseract"]
+module = ["qrcode", "rapidocr_onnxruntime", "pytesseract", "onnxruntime"]
 ignore_missing_imports = true
