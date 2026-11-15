@@ -62,6 +62,7 @@ export function App() {
   const browserStreamRef = useRef<MediaStream | null>(null);
   const browserTimerRef = useRef<number | null>(null);
   const hiddenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     continuousMicRef.current = continuousMic;
@@ -125,10 +126,23 @@ export function App() {
   }, [refreshLists]);
 
   useEffect(() => {
-    if (!showPreview || cameraStatus !== "active") return;
-    const id = window.setInterval(() => setPreviewTick((t) => t + 1), 1000);
+    if (!showPreview || cameraStatus !== "active") {
+      setDetections([]);
+      return;
+    }
+    if (previewVideoRef.current && browserStreamRef.current) {
+      previewVideoRef.current.srcObject = browserStreamRef.current;
+    }
+    const id = window.setInterval(async () => {
+      try {
+        const res = await api.detectLive();
+        setDetections(res.detections ?? []);
+      } catch {
+        // Ignore transient frame errors while camera warms up
+      }
+    }, 800);
     return () => window.clearInterval(id);
-  }, [showPreview, cameraStatus]);
+  }, [showPreview, cameraStatus, selectedCamera]);
 
   useEffect(() => {
     if (!pairing) return;
@@ -193,7 +207,7 @@ export function App() {
           "image/jpeg",
           0.78
         );
-      }, 500);
+      }, 180);
 
       speak("Browser webcam started.");
       await refreshLists();
@@ -515,11 +529,21 @@ export function App() {
           </div>
           {showPreview && cameraStatus === "active" ? (
             <div className="preview-container">
-              <img
-                className="preview-img"
-                src={`${getApiBase()}/api/v1/cameras/preview?t=${previewTick}`}
-                alt="Live camera preview showing what Vistara Vision sees"
-              />
+              {selectedCamera === "browser-cam-0" ? (
+                <video
+                  ref={previewVideoRef}
+                  className="preview-img"
+                  autoPlay
+                  playsInline
+                  muted
+                />
+              ) : (
+                <img
+                  className="preview-img"
+                  src={`${getApiBase()}/api/v1/cameras/stream?t=${previewTick}`}
+                  alt="Live camera preview showing what Vistara Vision sees"
+                />
+              )}
               <svg className="preview-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
                 {detections.map((d, idx) => {
                   const x = d.box.x1 * 100;

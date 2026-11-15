@@ -140,6 +140,10 @@ export const api = {
       body: form
     });
   },
+  detectLive: () =>
+    request<{ detections: DetectionItem[] }>("/api/v1/vision/detect", {
+      method: "POST"
+    }),
   describeScene: () =>
     request<{ spoken_response: string; detections: DetectionItem[] }>("/api/v1/vision/describe", {
       method: "POST"

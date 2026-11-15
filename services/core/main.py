@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Annotated, Any
 
@@ -13,7 +14,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from packages.memory.answering import MemoryAnswerEngine
@@ -273,6 +274,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="No active camera frame.")
         return Response(content=frame.jpeg_bytes, media_type="image/jpeg")
 
+    @app.get("/api/v1/cameras/stream")
+    async def camera_stream() -> StreamingResponse:
+        async def _mjpeg_generator() -> Any:
+            while c.camera_manager.active_status() == CameraStatus.ACTIVE:
+                frame = c.camera_manager.capture_frame()
+                if frame is not None:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + frame.jpeg_bytes + b"\r\n"
+                    )
+                await asyncio.sleep(0.066)
+
+        return StreamingResponse(
+            _mjpeg_generator(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+        )
+
     @app.post("/api/v1/cameras/browser/frame")
     async def browser_push_frame(file: Annotated[UploadFile, File(...)]) -> dict[str, Any]:
         src = c.camera_manager.get_source("browser-cam-0")
@@ -295,6 +313,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         c.frame_queue.push(frame)
         return frame
+
+    @app.post("/api/v1/vision/detect")
+    def detect_live() -> dict[str, Any]:
+        """Lightweight detection-only endpoint for live preview bounding boxes."""
+        frame = _require_frame()
+        profiles = c.memory.load_enrolled_profiles()
+        detections, _ = c.pipeline.process_frame(frame, profiles=profiles, require_stability=1)
+        return {
+            "detections": [
+                {
+                    "label": d.label,
+                    "confidence": d.confidence,
+                    "is_personal_match": d.is_personal_match,
+                    "object_id": d.object_id,
+                    "position": describe_relative_position(d.box),
+                    "box": {"x1": d.box.x1, "y1": d.box.y1, "x2": d.box.x2, "y2": d.box.y2},
+                }
+                for d in detections
+            ]
+        }
 
     @app.post("/api/v1/vision/describe")
     def describe_scene() -> dict[str, Any]:
