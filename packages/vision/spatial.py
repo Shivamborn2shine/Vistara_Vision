@@ -96,12 +96,13 @@ def narrate_scene(
         reverse=True,
     )
 
-    # Group counts for repeated identical labels (e.g., 2 chairs)
+    # Prefer a person as the spatial anchor when present, otherwise highest-ranked object
+    person_anchor = next((d for d in ordered if d.label == "person"), None)
+    anchor = person_anchor or ordered[0]
     phrases: list[str] = []
-    anchor = ordered[0]
     for idx, d in enumerate(ordered[:5]):
         pos = describe_relative_position(d.box)
-        rel = _spatial_relation(d, anchor) if idx > 0 else None
+        rel = _spatial_relation(d, anchor) if d is not anchor else None
         loc = f"{rel}, {pos}" if rel else pos
         tag = "your " if d.is_personal_match else ""
         hint = OBJECT_KNOWLEDGE_HINTS.get(d.label, "")

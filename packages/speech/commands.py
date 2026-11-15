@@ -70,8 +70,6 @@ def parse_voice_command(text: str) -> ParsedCommand:
             raw_text=raw,
         )
 
-    return ParsedCommand(intent=CommandIntent.UNKNOWN, raw_text=raw)
-
     if any(k in low for k in ("stop speaking", "be quiet", "cancel speech", "shut up")):
         return ParsedCommand(intent=CommandIntent.STOP_SPEAKING, raw_text=raw)
 
