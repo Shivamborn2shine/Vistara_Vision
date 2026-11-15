@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import io
+from typing import Any
+
+import numpy as np
+from PIL import Image
+
+from packages.vision.contracts import BoundingBox, CameraFrame, Detection
+
+
+def describe_relative_position(box: BoundingBox) -> str:
+    """Describe qualitative position in the frame without fabricating room coordinates."""
+    cx = box.center_x
+    cy = box.center_y
+
+    horiz = "on the left" if cx < 0.36 else ("on the right" if cx > 0.64 else "in the center")
+    vert = "upper area" if cy < 0.35 else ("lower area" if cy > 0.68 else "middle area")
+    return f"{horiz}, {vert}"
+
+
+def assess_frame_lighting(frame: CameraFrame) -> tuple[float, str | None]:
+    """Return mean luminance [0..1] and an optional guidance message for dark/overexposed frames."""
+    img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("L")
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    mean_luma = float(arr.mean())
+    if mean_luma < 0.14:
+        return (
+            mean_luma,
+            "The scene looks too dark. Please turn on a light or move closer to a light source.",
+        )
+    if mean_luma > 0.94:
+        return (
+            mean_luma,
+            "The image has strong glare or overexposure. Try tilting the camera slightly.",
+        )
+    return mean_luma, None
+
+
+class HeuristicObjectDetector:
+    """
+    Baseline local object detector using salient region analysis.
+
+    Designed as a zero-weight-download fallback so the full perception -> memory ->
+    voice pipeline runs immediately on any Windows laptop, and can be swapped for
+    an ONNX YOLO detector via the ObjectDetector protocol.
+    """
+
+    model_version = "heuristic-salient-v1"
+
+    def detect(self, frame: CameraFrame) -> list[Detection]:
+        img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("RGB")
+        small = img.resize((64, 48), Image.Resampling.BILINEAR)
+        arr = np.asarray(small, dtype=np.float32) / 255.0
+
+        # Identify salient foreground regions relative to frame median color
+        median_rgb = np.median(arr, axis=(0, 1))
+        diff = np.linalg.norm(arr - median_rgb, axis=2)
+        mask = diff > 0.22
+
+        detections: list[Detection] = []
+        if np.any(mask):
+            ys, xs = np.where(mask)
+            # Split into left and right clusters if wide, or single salient object
+            x1 = float(xs.min()) / 64.0
+            y1 = float(ys.min()) / 48.0
+            x2 = float(xs.max() + 1) / 64.0
+            y2 = float(ys.max() + 1) / 48.0
+
+            if (x2 - x1) > 0.08 and (y2 - y1) > 0.08:
+                # Check dominant hue to give a helpful grounded description
+                region = arr[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+                mean_rgb = region.mean(axis=(0, 1))
+                label = self._classify_salient_region(mean_rgb, x2 - x1, y2 - y1)
+                detections.append(
+                    Detection(
+                        label=label,
+                        box=BoundingBox(
+                            x1=round(x1, 3), y1=round(y1, 3), x2=round(x2, 3), y2=round(y2, 3)
+                        ),
+                        confidence=0.72,
+                        model_version=self.model_version,
+                        track_id="salient-1",
+                    )
+                )
+
+        return detections
+
+    @staticmethod
+    def _classify_salient_region(mean_rgb: Any, width: float, height: float) -> str:
+        r, g, b = float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])
+        if b > r + 0.15 and b > g + 0.05 and height > width:
+            return "blue bottle"
+        if r > 0.7 and g > 0.7 and b > 0.65 and width >= height:
+            return "notebook"
+        if width > 0.6 and height < 0.35:
+            return "table"
+        return "nearby object"

@@ -1,0 +1,519 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  api,
+  type CameraInfo,
+  type DiagnosticsPayload,
+  type LearnedObject,
+  type ObservationItem,
+  type PairingPayload
+} from "./api";
+
+declare global {
+  interface Window {
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+  }
+}
+
+interface SpeechRecognitionLike {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  onresult: ((ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onerror: ((ev: { error: string }) => void) | null;
+  onend: (() => void) | null;
+}
+
+export function App() {
+  const [cameras, setCameras] = useState<CameraInfo[]>([]);
+  const [selectedCamera, setSelectedCamera] = useState<string>("mock-cam-0");
+  const [cameraStatus, setCameraStatus] = useState<string>("stopped");
+  const [announcement, setAnnouncement] = useState<string>(
+    "Vistara Vision is ready. Press Start Vision or use the voice command bar."
+  );
+  const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
+  const [speechRate, setSpeechRate] = useState<number>(1.0);
+  const [listening, setListening] = useState<boolean>(false);
+  const [commandText, setCommandText] = useState<string>("");
+
+  const [teachLabel, setTeachLabel] = useState<string>("");
+  const [teachNote, setTeachNote] = useState<string>("");
+  const [learnedObjects, setLearnedObjects] = useState<LearnedObject[]>([]);
+
+  const [memoryQuery, setMemoryQuery] = useState<string>("");
+  const [observations, setObservations] = useState<ObservationItem[]>([]);
+
+  const [pairing, setPairing] = useState<PairingPayload | null>(null);
+  const [showPreview, setShowPreview] = useState<boolean>(false);
+  const [previewTick, setPreviewTick] = useState<number>(0);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
+
+  const speak = useCallback(
+    (text: string) => {
+      setAnnouncement(text);
+      if (!autoSpeak || typeof window === "undefined" || !("speechSynthesis" in window)) {
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = speechRate;
+      window.speechSynthesis.speak(utter);
+    },
+    [autoSpeak, speechRate]
+  );
+
+  const stopSpeaking = useCallback(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, []);
+
+  const refreshLists = useCallback(async () => {
+    try {
+      const [cams, objs, obs, diag] = await Promise.all([
+        api.listCameras(),
+        api.listObjects(),
+        api.listObservations(),
+        api.diagnostics()
+      ]);
+      setCameras(cams);
+      setLearnedObjects(objs);
+      setObservations(obs);
+      setDiagnostics(diag);
+      setCameraStatus(diag.camera_status);
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Could not reach local Vistara service.");
+    }
+  }, [speak]);
+
+  useEffect(() => {
+    void refreshLists();
+  }, [refreshLists]);
+
+  useEffect(() => {
+    if (!showPreview || cameraStatus !== "active") return;
+    const id = window.setInterval(() => setPreviewTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [showPreview, cameraStatus]);
+
+  useEffect(() => {
+    if (!pairing) return;
+    const id = window.setInterval(async () => {
+      try {
+        const st = await api.pairingStatus(pairing.token);
+        if (st.state === "connected") {
+          setPairing((prev) => (prev ? { ...prev, state: "connected" } : null));
+          setCameraStatus("active");
+          speak("Phone camera connected and active.");
+          void refreshLists();
+          window.clearInterval(id);
+        }
+      } catch {
+        window.clearInterval(id);
+      }
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [pairing, refreshLists, speak]);
+
+  const handleStartCamera = async () => {
+    try {
+      const res = await api.startCamera(selectedCamera);
+      setCameraStatus(res.status);
+      speak(res.spoken_response);
+      await refreshLists();
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Failed to start camera.");
+    }
+  };
+
+  const handleStopCamera = async () => {
+    try {
+      const res = await api.stopCamera();
+      setCameraStatus(res.status);
+      speak(res.spoken_response);
+      await refreshLists();
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Failed to stop camera.");
+    }
+  };
+
+  const handleDescribe = async () => {
+    try {
+      const res = await api.describeScene();
+      speak(res.spoken_response);
+      await refreshLists();
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Could not describe scene.");
+    }
+  };
+
+  const handleReadText = async () => {
+    try {
+      const res = await api.readText();
+      speak(res.spoken_response);
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Could not read text.");
+    }
+  };
+
+  const handleCurrency = async () => {
+    try {
+      const res = await api.analyzeCurrency();
+      speak(res.spoken_response);
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Could not analyze currency.");
+    }
+  };
+
+  const handleTeach = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!teachLabel.trim()) {
+      speak("Please enter a name for the object before teaching.");
+      return;
+    }
+    try {
+      const res = await api.teachObject(teachLabel.trim(), teachNote.trim() || undefined);
+      setTeachLabel("");
+      setTeachNote("");
+      speak(res.spoken_response);
+      await refreshLists();
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Could not learn object.");
+    }
+  };
+
+  const handleAskMemory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!memoryQuery.trim()) {
+      speak("Enter an item name to search your memory.");
+      return;
+    }
+    try {
+      const res = await api.askLastSeen(memoryQuery.trim());
+      speak(res.spoken_response);
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Memory search failed.");
+    }
+  };
+
+  const handleCommandSubmit = async (textToSend: string) => {
+    if (!textToSend.trim()) return;
+    try {
+      const res = await api.sendCommand(textToSend.trim());
+      setCommandText("");
+      speak(res.spoken_response);
+      await refreshLists();
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Command failed.");
+    }
+  };
+
+  const handleVoiceMic = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      speak("Browser speech recognition is unavailable. Please type your command in the command box.");
+      return;
+    }
+    const rec = new SR();
+    rec.lang = "en-IN";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    setListening(true);
+    rec.onresult = (ev) => {
+      const transcript = ev.results[0]?.[0]?.transcript ?? "";
+      setCommandText(transcript);
+      void handleCommandSubmit(transcript);
+    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => setListening(false);
+    rec.start();
+  };
+
+  const handleCreatePairing = async () => {
+    try {
+      const res = await api.createPairing();
+      setPairing(res);
+      speak(res.spoken_response);
+    } catch (err) {
+      speak(err instanceof Error ? err.message : "Could not start phone pairing.");
+    }
+  };
+
+  return (
+    <div className="app-shell">
+      <header className="top-bar">
+        <div className="brand">
+          <h1>Vistara Vision</h1>
+          <p>Voice-first assistive vision, currency reading &amp; honest memory</p>
+        </div>
+        <div className="status-strip">
+          <span
+            className={`badge ${cameraStatus === "active" ? "active" : ""}`}
+            aria-label={`Camera status: ${cameraStatus}`}
+          >
+            Camera: {cameraStatus.toUpperCase()}
+          </span>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={handleStopCamera}
+            aria-label="Stop Camera immediately"
+          >
+            Stop Camera
+          </button>
+          <button type="button" className="btn" onClick={stopSpeaking}>
+            Stop Speaking
+          </button>
+        </div>
+      </header>
+
+      <section className="announcement-banner" aria-live="assertive" aria-atomic="true">
+        <p className="announcement-text">{announcement}</p>
+        <button type="button" className="btn" onClick={() => speak(announcement)}>
+          Repeat
+        </button>
+      </section>
+
+      <form
+        className="command-bar"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handleCommandSubmit(commandText);
+        }}
+      >
+        <label htmlFor="voice-cmd-input" className="muted" style={{ alignSelf: "center" }}>
+          Command:
+        </label>
+        <input
+          id="voice-cmd-input"
+          type="text"
+          value={commandText}
+          onChange={(e) => setCommandText(e.target.value)}
+          placeholder='Try: "What is in front of me?", "Count these notes", "Where was my bottle?"'
+        />
+        <button type="submit" className="btn btn-primary">
+          Run Command
+        </button>
+        <button type="button" className="btn" onClick={handleVoiceMic}>
+          {listening ? "Listening..." : "Speak (Mic)"}
+        </button>
+      </form>
+
+      <main className="grid-4">
+        {/* 1. Start Vision */}
+        <section className="card" aria-labelledby="h-vision">
+          <h2 id="h-vision">1. Start Vision</h2>
+          <label htmlFor="camera-select" className="muted">
+            Select camera source
+          </label>
+          <select
+            id="camera-select"
+            value={selectedCamera}
+            onChange={(e) => setSelectedCamera(e.target.value)}
+          >
+            {cameras.map((cam) => (
+              <option key={cam.source_id} value={cam.source_id}>
+                {cam.name} {cam.available ? "" : "(Unavailable)"}
+              </option>
+            ))}
+          </select>
+          <div className="btn-row">
+            <button type="button" className="btn btn-primary" onClick={handleStartCamera}>
+              Start Vision
+            </button>
+            <button type="button" className="btn" onClick={handleDescribe}>
+              What Do You See?
+            </button>
+            <button type="button" className="btn" onClick={handleReadText}>
+              Read Text
+            </button>
+            <button type="button" className="btn" onClick={handleCurrency}>
+              Identify Currency
+            </button>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <input
+              type="checkbox"
+              checked={showPreview}
+              onChange={(e) => setShowPreview(e.target.checked)}
+            />
+            Show visual preview (for sighted helper)
+          </label>
+          {showPreview && cameraStatus === "active" && (
+            <img
+              className="preview-img"
+              src={`/api/v1/cameras/preview?t=${previewTick}`}
+              alt="Live camera preview"
+            />
+          )}
+        </section>
+
+        {/* 2. Connect Phone Camera */}
+        <section className="card" aria-labelledby="h-phone">
+          <h2 id="h-phone">2. Connect Phone Camera</h2>
+          <p className="muted">
+            Pair a phone browser with a single-use expiring link and explicit camera consent.
+          </p>
+          <button type="button" className="btn btn-primary" onClick={handleCreatePairing}>
+            Generate QR &amp; Pairing Link
+          </button>
+          {pairing && (
+            <div className="qr-box">
+              <img src={pairing.qr_data_uri} alt="QR code to pair phone camera" />
+              <strong>Code: {pairing.short_code}</strong>
+              <span style={{ fontSize: "0.8rem", wordBreak: "break-all" }}>{pairing.join_url}</span>
+              <span style={{ fontSize: "0.85rem" }}>State: {pairing.state}</span>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={async () => {
+                  await api.disconnectPairing(pairing.token);
+                  setPairing(null);
+                  speak("Phone camera disconnected.");
+                  void refreshLists();
+                }}
+              >
+                Disconnect Phone
+              </button>
+            </div>
+          )}
+        </section>
+
+        {/* 3. Teach Object */}
+        <section className="card" aria-labelledby="h-teach">
+          <h2 id="h-teach">3. Teach Object</h2>
+          <form onSubmit={handleTeach} style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+            <label htmlFor="teach-label" className="muted">
+              Object name
+            </label>
+            <input
+              id="teach-label"
+              type="text"
+              value={teachLabel}
+              onChange={(e) => setTeachLabel(e.target.value)}
+              placeholder="e.g., Blue water bottle"
+            />
+            <input
+              type="text"
+              value={teachNote}
+              onChange={(e) => setTeachNote(e.target.value)}
+              placeholder="Optional note (e.g., Metal cap)"
+              aria-label="Optional object note"
+            />
+            <button type="submit" className="btn btn-primary">
+              Learn From Active Camera
+            </button>
+          </form>
+          <ul className="list" aria-label="Learned personal objects">
+            {learnedObjects.map((obj) => (
+              <li key={obj.object_id} className="list-item">
+                <span>
+                  <strong>{obj.label}</strong>{" "}
+                  <span className="muted">({obj.embedding_count} views)</span>
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  aria-label={`Delete ${obj.label}`}
+                  onClick={async () => {
+                    await api.deleteObject(obj.object_id);
+                    speak(`Deleted ${obj.label}.`);
+                    void refreshLists();
+                  }}
+                >
+                  Delete
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {/* 4. Ask Memory */}
+        <section className="card" aria-labelledby="h-memory">
+          <h2 id="h-memory">4. Ask Memory</h2>
+          <form onSubmit={handleAskMemory} style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+            <label htmlFor="memory-query" className="muted">
+              Ask where an item was last observed
+            </label>
+            <input
+              id="memory-query"
+              type="text"
+              value={memoryQuery}
+              onChange={(e) => setMemoryQuery(e.target.value)}
+              placeholder="e.g., bottle, keys, charger"
+            />
+            <button type="submit" className="btn btn-primary">
+              Where Was It?
+            </button>
+          </form>
+          <ul className="list" aria-label="Recent observations">
+            {observations.slice(0, 6).map((obs) => (
+              <li key={obs.event_id} className="list-item">
+                <span>
+                  <strong>{obs.label}</strong> — <span className="muted">{obs.landmark_relation}</span>
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  aria-label={`Forget observation of ${obs.label}`}
+                  onClick={async () => {
+                    await api.deleteObservation(obs.event_id);
+                    speak(`Forgot observation of ${obs.label}.`);
+                    void refreshLists();
+                  }}
+                >
+                  Forget
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={async () => {
+              const res = await api.clearAllMemory();
+              speak(res.spoken_response);
+              void refreshLists();
+            }}
+          >
+            Clear All Memory
+          </button>
+        </section>
+      </main>
+
+      <footer className="card" aria-labelledby="h-settings">
+        <h2 id="h-settings">Accessibility &amp; Privacy Settings</h2>
+        <div className="btn-row" style={{ alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <input
+              type="checkbox"
+              checked={autoSpeak}
+              onChange={(e) => setAutoSpeak(e.target.checked)}
+            />
+            Auto-speak responses
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            Speech speed ({speechRate.toFixed(1)}x)
+            <input
+              type="range"
+              min={0.7}
+              max={1.6}
+              step={0.1}
+              value={speechRate}
+              onChange={(e) => setSpeechRate(Number(e.target.value))}
+            />
+          </label>
+          {diagnostics && (
+            <span className="muted">
+              Local-only mode: {diagnostics.cloud_vision_enabled ? "Cloud enabled" : "On-device only"} |
+              Learned objects: {diagnostics.learned_objects_count} | Dropped frames:{" "}
+              {diagnostics.dropped_frames}
+            </span>
+          )}
+        </div>
+      </footer>
+    </div>
+  );
+}

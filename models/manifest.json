@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "heuristic-salient-v1",
+      "role": "object_detector",
+      "runtime": "local-numpy",
+      "license": "MIT",
+      "notes": "Zero-download baseline detector; replaceable via ObjectDetector protocol."
+    },
+    {
+      "id": "local-hist-v1",
+      "role": "visual_encoder",
+      "runtime": "local-numpy",
+      "embedding_dim": 64,
+      "license": "MIT",
+      "notes": "Versioned 64-dim L2-normalized encoder for teachable objects."
+    },
+    {
+      "id": "inr-color-geom-v1",
+      "role": "currency_analyzer",
+      "runtime": "local-numpy",
+      "license": "MIT",
+      "notes": "Baseline INR denomination estimator with strict abstention and non-authentication disclaimer."
+    }
+  ]
+}
