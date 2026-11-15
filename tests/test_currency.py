@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from PIL import Image
 
 from packages.vision.contracts import BoundingBox, CameraFrame, CurrencyNoteCandidate
-from packages.vision.currency import INRCurrencyAnalyzer
+from packages.vision.currency import _DENOM_RE, _PREFIXED_DENOM_RE, INRCurrencyAnalyzer
 
 
 def _make_frame(rgb: tuple[int, int, int]) -> CameraFrame:
@@ -61,3 +61,26 @@ def test_currency_deduplicates_multi_frame_note_and_counts_distinct() -> None:
     assert res.distinct_count == 2
     assert res.total_inr == 600
     assert "cannot verify whether a banknote is genuine" in res.authenticity_disclaimer.lower()
+
+
+def test_currency_denom_regex_handles_rupee_misreads_and_ignores_percentages() -> None:
+    assert [m.group(1) for m in _PREFIXED_DENOM_RE.finditer("天100")] == ["100"]
+    assert [m.group(1) for m in _PREFIXED_DENOM_RE.finditer("₹100")] == ["100"]
+    assert [m.group(1) for m in _PREFIXED_DENOM_RE.finditer("Rs 500")] == ["500"]
+    assert [m.group(1) for m in _DENOM_RE.finditer("person50%)")] == []
+    assert [m.group(1) for m in _DENOM_RE.finditer("5BR 438185")] == []
+
+
+def test_currency_color_fallback_identifies_warm_lavender_100() -> None:
+    analyzer = INRCurrencyAnalyzer()
+    # Warm indoor-lit lavender Rs 100 note (must not misclassify as Rs 2000)
+    img = Image.new("RGB", (200, 120), color=(148, 120, 126))
+    cand = analyzer._classify_crop_hsv(
+        img,
+        BoundingBox(0.1, 0.1, 0.9, 0.9),
+        track_id="center-note",
+        allow_grey_500=False,
+    )
+    assert cand is not None
+    assert cand.denomination_inr == 100
+    assert cand.confidence >= 0.70

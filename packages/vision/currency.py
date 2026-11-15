@@ -29,13 +29,22 @@ _INR_PROFILES: dict[int, dict[str, Any]] = {
     10: {"rgb_ratio": (0.40, 0.32, 0.28), "hue": (10.0, 38.0), "min_sat": 0.14},
     20: {"rgb_ratio": (0.37, 0.40, 0.23), "hue": (52.0, 90.0), "min_sat": 0.16},
     50: {"rgb_ratio": (0.22, 0.38, 0.40), "hue": (170.0, 212.0), "min_sat": 0.18},
-    100: {"rgb_ratio": (0.34, 0.31, 0.35), "hue": (210.0, 325.0), "min_sat": 0.05},
+    100: {"rgb_ratio": (0.34, 0.31, 0.35), "hue": (205.0, 355.0), "min_sat": 0.04},
     200: {"rgb_ratio": (0.48, 0.34, 0.18), "hue": (20.0, 48.0), "min_sat": 0.28},
     500: {"rgb_ratio": (0.34, 0.34, 0.32), "hue": (0.0, 360.0), "min_sat": 0.0},
-    2000: {"rgb_ratio": (0.41, 0.25, 0.34), "hue": (290.0, 350.0), "min_sat": 0.18},
+    2000: {"rgb_ratio": (0.41, 0.25, 0.34), "hue": (290.0, 345.0), "min_sat": 0.22},
 }
 
-_DENOM_RE = re.compile(r"(?:₹|rs\.?|inr)?\s*\b(10|20|50|100|200|500|2000)\b", re.IGNORECASE)
+# Match clear denomination numbers, including common OCR misreads of '₹' (e.g. '天100', 'F100', 'R100'),
+# while rejecting serial numbers (adjacent digits) and percentages (e.g. '50%').
+_DENOM_RE = re.compile(
+    r"(?:₹|rs\.?|inr|[^\x00-\x7F]|(?<![0-9A-Za-z])[FTR])?\s*(?<![0-9A-Za-z.])(10|20|50|100|200|500|2000)(?![0-9A-Za-z]|\s*%)",
+    re.IGNORECASE,
+)
+_PREFIXED_DENOM_RE = re.compile(
+    r"(?:₹|rs\.?|inr|[^\x00-\x7F]|(?<![0-9A-Za-z])[FTR])\s*(10|20|50|100|200|500|2000)(?!\d|\s*%)",
+    re.IGNORECASE,
+)
 _CURRENCY_CONTEXT_RE = re.compile(
     r"(₹|reserve\s*bank|rbi|india|rupee|भारत|रुपये)", re.IGNORECASE
 )
@@ -297,6 +306,8 @@ class INRCurrencyAnalyzer:
 
         windows = [
             BoundingBox(0.20, 0.22, 0.80, 0.78),
+            BoundingBox(0.32, 0.30, 0.68, 0.72),
+            BoundingBox(0.36, 0.20, 0.64, 0.84),
             BoundingBox(0.32, 0.55, 0.68, 0.90),
         ]
         best: CurrencyNoteCandidate | None = None
@@ -347,10 +358,15 @@ class INRCurrencyAnalyzer:
                 for item in res:
                     txt = str(item[1]).strip()
                     conf = float(item[2])
-                    for m in _DENOM_RE.finditer(txt):
+                    prefixed_denoms = {int(m.group(1)) for m in _PREFIXED_DENOM_RE.finditer(txt)}
+                    matches = list(_PREFIXED_DENOM_RE.finditer(txt)) or list(_DENOM_RE.finditer(txt))
+                    for m in matches:
                         denom = int(m.group(1))
                         if denom in SUPPORTED_INR_DENOMINATIONS:
-                            score = min(0.96, conf if has_context else conf * 0.90)
+                            if denom in prefixed_denoms or has_context:
+                                score = min(0.99, max(0.95, conf))
+                            else:
+                                score = min(0.96, conf * 0.92)
                             found.append(
                                 CurrencyNoteCandidate(
                                     denomination_inr=denom,
@@ -418,13 +434,19 @@ class INRCurrencyAnalyzer:
                 if sat > 0.10 or rb > rg + 0.015:
                     score *= 0.45
             elif denom == 100:
-                # Lavender: Blue is noticeably higher than Green (violet/lavender)
-                if (rb > rg + 0.015 and rb > rr - 0.02) or (
+                # Lavender: Blue is higher than Green (handles both cool and warm indoor light)
+                if (rb > rg + 0.01 and rb > rr - 0.08) or (
                     h_lo <= hue <= h_hi and sat >= prof["min_sat"] and rb > rg
                 ):
                     score = min(0.95, score + 0.22)
                 else:
                     score *= 0.55
+            elif denom == 2000:
+                # Bright magenta: Blue must be strongly above Green with high saturation
+                if h_lo <= hue <= h_hi and sat >= prof["min_sat"] and rb >= rg + 0.05:
+                    score = min(0.95, score + 0.18)
+                else:
+                    score *= 0.45
             elif denom == 50:
                 # Cyan-blue: Green is strong alongside Blue, Red is low
                 if h_lo <= hue <= 208.0 and sat >= prof["min_sat"] and rg >= rb * 0.96:
