@@ -45,6 +45,9 @@ export function App() {
   const [speechRate, setSpeechRate] = useState<number>(1.0);
   const [listening, setListening] = useState<boolean>(false);
   const [holdingToSpeak, setHoldingToSpeak] = useState<boolean>(false);
+  const [micLevel, setMicLevel] = useState<number>(0);
+  const [voiceStatus, setVoiceStatus] = useState<string>("Ready — hold Alt+Space or Hold to Speak");
+  const [liveTranscript, setLiveTranscript] = useState<string>("");
   const [continuousMic, setContinuousMic] = useState<boolean>(false);
   const [lastHeard, setLastHeard] = useState<string>("");
   const [commandText, setCommandText] = useState<string>("");
@@ -67,6 +70,9 @@ export function App() {
   const pttTranscriptRef = useRef<string>("");
   const pttPendingSubmitRef = useRef<boolean>(false);
   const pttSubmitTimerRef = useRef<number | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
+  const micRafRef = useRef<number | null>(null);
   const continuousMicRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
   const browserStreamRef = useRef<MediaStream | null>(null);
@@ -456,6 +462,78 @@ export function App() {
     }
   }, []);
 
+  const stopMicMeter = useCallback(() => {
+    if (micRafRef.current !== null) {
+      window.cancelAnimationFrame(micRafRef.current);
+      micRafRef.current = null;
+    }
+    setMicLevel(0);
+  }, []);
+
+  const startMicMeter = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      if (!micStreamRef.current) {
+        micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!micCtxRef.current || micCtxRef.current.state === "closed") {
+        micCtxRef.current = new AudioCtx();
+      }
+      if (micCtxRef.current.state === "suspended") {
+        await micCtxRef.current.resume();
+      }
+      const source = micCtxRef.current.createMediaStreamSource(micStreamRef.current);
+      const analyser = micCtxRef.current.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+
+      const tick = () => {
+        if (!pttActiveRef.current) {
+          setMicLevel(0);
+          return;
+        }
+        analyser.getByteTimeDomainData(data);
+        let sumSq = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const v = (data[i] - 128) / 128;
+          sumSq += v * v;
+        }
+        const rms = Math.sqrt(sumSq / data.length);
+        const level = Math.min(100, Math.round(rms * 320));
+        setMicLevel(level);
+        micRafRef.current = window.requestAnimationFrame(tick);
+      };
+      if (micRafRef.current !== null) {
+        window.cancelAnimationFrame(micRafRef.current);
+      }
+      micRafRef.current = window.requestAnimationFrame(tick);
+    } catch {
+      setVoiceStatus("Microphone access failed — check browser mic permissions.");
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (micRafRef.current !== null) {
+        window.cancelAnimationFrame(micRafRef.current);
+      }
+      if (micStreamRef.current) {
+        for (const track of micStreamRef.current.getTracks()) {
+          track.stop();
+        }
+        micStreamRef.current = null;
+      }
+      if (micCtxRef.current && micCtxRef.current.state !== "closed") {
+        void micCtxRef.current.close().catch(() => {});
+      }
+    };
+  }, []);
+
   const flushPttCommand = useCallback(() => {
     if (pttSubmitTimerRef.current !== null) {
       window.clearTimeout(pttSubmitTimerRef.current);
@@ -467,10 +545,13 @@ export function App() {
     pttTranscriptRef.current = "";
     if (finalText) {
       setLastHeard(finalText);
+      setLiveTranscript(finalText);
       setCommandText(finalText);
+      setVoiceStatus(`Sent: "${finalText}"`);
       void handleCommandSubmit(finalText);
     } else {
-      setAnnouncement("No voice command heard while holding the button.");
+      setVoiceStatus("No words recognized — check the input level bar and speak closer.");
+      setAnnouncement("No voice command heard while holding.");
     }
   }, [handleCommandSubmit]);
 
@@ -479,7 +560,11 @@ export function App() {
     if (!SR) {
       pttActiveRef.current = false;
       setHoldingToSpeak(false);
-      speak("Browser speech recognition is unavailable. Use Chrome or Edge, or type in the command box.");
+      stopMicMeter();
+      const msg =
+        "Browser speech recognition is unavailable. Use Chrome or Edge, or type in the command box.";
+      setVoiceStatus(msg);
+      speak(msg);
       return;
     }
     const rec = new SR();
@@ -489,6 +574,7 @@ export function App() {
     rec.maxAlternatives = 1;
     recognitionRef.current = rec;
     setListening(true);
+    setVoiceStatus("Listening... Speak now (release Alt+Space or button to send)");
 
     let sessionCommitted = pttTranscriptRef.current;
 
@@ -502,18 +588,41 @@ export function App() {
       pttTranscriptRef.current = combined;
       if (combined) {
         setLastHeard(combined);
+        setLiveTranscript(combined);
         setCommandText(combined);
       }
     };
 
     rec.onerror = (ev) => {
-      if (ev.error === "not-allowed") {
-        pttActiveRef.current = false;
-        pttPendingSubmitRef.current = false;
-        setHoldingToSpeak(false);
-        setListening(false);
-        recognitionRef.current = null;
-        speak("Microphone permission was denied. Please allow microphone access in your browser.");
+      const errCode = ev.error || "unknown";
+      if (errCode === "no-speech") {
+        setVoiceStatus("Listening... No speech detected yet.");
+        return;
+      }
+      if (errCode === "aborted") {
+        return;
+      }
+      pttActiveRef.current = false;
+      pttPendingSubmitRef.current = false;
+      setHoldingToSpeak(false);
+      setListening(false);
+      stopMicMeter();
+      recognitionRef.current = null;
+      if (errCode === "not-allowed") {
+        const msg = "Microphone permission was denied. Allow mic access in browser settings.";
+        setVoiceStatus(msg);
+        speak(msg);
+      } else if (errCode === "network" || errCode === "service-not-allowed") {
+        const msg =
+          "Speech recognition blocked by browser/network (Brave blocks speech servers). Use Chrome or Edge for voice commands.";
+        setVoiceStatus(msg);
+        setAnnouncement(msg);
+      } else if (errCode === "audio-capture") {
+        const msg = "No microphone found or microphone is busy.";
+        setVoiceStatus(msg);
+        speak(msg);
+      } else {
+        setVoiceStatus(`Speech error: ${errCode}`);
       }
     };
 
@@ -528,8 +637,12 @@ export function App() {
       flushPttCommand();
     };
 
-    rec.start();
-  }, [flushPttCommand, speak]);
+    try {
+      rec.start();
+    } catch {
+      setVoiceStatus("Could not start speech recognition.");
+    }
+  }, [flushPttCommand, speak, stopMicMeter]);
 
   const startHoldToSpeak = useCallback(() => {
     if (pttActiveRef.current) return;
@@ -542,16 +655,20 @@ export function App() {
     pttPendingSubmitRef.current = false;
     pttActiveRef.current = true;
     setHoldingToSpeak(true);
+    setLiveTranscript("");
     setCommandText("");
+    setVoiceStatus("Listening... Speak now");
     playMicTone(660, 80);
+    void startMicMeter();
     launchPttRecognition();
-  }, [launchPttRecognition, playMicTone, stopSpeaking]);
+  }, [launchPttRecognition, playMicTone, startMicMeter, stopSpeaking]);
 
   const stopHoldToSpeak = useCallback(() => {
     if (!pttActiveRef.current) return;
     pttActiveRef.current = false;
     pttPendingSubmitRef.current = true;
     setHoldingToSpeak(false);
+    stopMicMeter();
     playMicTone(440, 80);
     if (recognitionRef.current) {
       recognitionRef.current.stop();
@@ -561,7 +678,7 @@ export function App() {
     } else {
       flushPttCommand();
     }
-  }, [flushPttCommand, playMicTone]);
+  }, [flushPttCommand, playMicTone, stopMicMeter]);
 
   useEffect(() => {
     if (!holdingToSpeak) return;
@@ -570,14 +687,24 @@ export function App() {
     };
     window.addEventListener("pointerup", onRelease);
     window.addEventListener("pointercancel", onRelease);
+    window.addEventListener("blur", onRelease);
     return () => {
       window.removeEventListener("pointerup", onRelease);
       window.removeEventListener("pointercancel", onRelease);
+      window.removeEventListener("blur", onRelease);
     };
   }, [holdingToSpeak, stopHoldToSpeak]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && (e.code === "Space" || e.key === " ")) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) {
+          startHoldToSpeak();
+        }
+        return;
+      }
       if (!e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === "m") {
@@ -588,9 +715,20 @@ export function App() {
         void handleDescribe();
       }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleDescribe, startVoiceRecognition]);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (pttActiveRef.current && (e.code === "Space" || e.key === " " || e.key === "Alt")) {
+        e.preventDefault();
+        e.stopPropagation();
+        stopHoldToSpeak();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [handleDescribe, startHoldToSpeak, startVoiceRecognition, stopHoldToSpeak]);
 
   const handleCreatePairing = async () => {
     try {
@@ -685,10 +823,10 @@ export function App() {
               }}
               onContextMenu={(e) => e.preventDefault()}
               aria-pressed={holdingToSpeak}
-              aria-label="Hold to speak voice command"
-              title="Press and hold while speaking; release to run command"
+              aria-label="Hold to speak voice command (Alt + Space)"
+              title="Hold Alt+Space or press and hold this button while speaking; release to send"
             >
-              {holdingToSpeak ? "Listening... Release to Send" : "Hold to Speak"}
+              {holdingToSpeak ? "Listening... Release to Send" : "Hold to Speak (Alt+Space)"}
             </button>
             <button
               type="button"
@@ -714,11 +852,32 @@ export function App() {
               Hands-free
             </label>
           </form>
-          {lastHeard && (
-            <p className="muted" style={{ marginTop: "-0.5rem", marginBottom: "0.5rem" }}>
-              Last heard: <strong>&ldquo;{lastHeard}&rdquo;</strong>
-            </p>
-          )}
+          <div
+            className={`voice-monitor ${holdingToSpeak ? "voice-monitor-active" : ""}`}
+            aria-live="polite"
+          >
+            <div className="voice-monitor-row">
+              <span className="muted">
+                <strong>Voice:</strong> {voiceStatus}
+              </span>
+              <div className="mic-meter-wrap" aria-label={`Microphone input level ${micLevel}%`}>
+                <span className="muted" style={{ whiteSpace: "nowrap" }}>
+                  Input: {micLevel}%
+                </span>
+                <div className="mic-meter-track">
+                  <div className="mic-meter-fill" style={{ width: `${micLevel}%` }} />
+                </div>
+              </div>
+            </div>
+            <div className="muted">
+              <strong>Live transcript:</strong>{" "}
+              {liveTranscript
+                ? `“${liveTranscript}”`
+                : lastHeard
+                  ? `Last heard: “${lastHeard}”`
+                  : "Waiting for speech while holding Alt+Space..."}
+            </div>
+          </div>
         </div>
 
         <aside className="card" aria-label="Top-right live camera preview">
