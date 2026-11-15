@@ -37,27 +37,29 @@ class GeminiVisionAssistant:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-3.8-flash",
+        model: str = "gemini-3.5-flash",
         config_path: Path | None = None,
         timeout_seconds: float = 25.0,
     ) -> None:
         self._api_key = (api_key or "").strip() or None
-        self._model = model.strip() or "gemini-3.8-flash"
+        self._model = model.strip() or "gemini-3.5-flash"
+        if self._model == "gemini-2.5-flash":
+            self._model = "gemini-3.5-flash"
         self._config_path = config_path
         self._timeout = timeout_seconds
         self._load_persisted_config()
 
     def _load_persisted_config(self) -> None:
-        if self._api_key or self._config_path is None or not self._config_path.exists():
+        if self._config_path is None or not self._config_path.exists():
             return
         try:
             data = json.loads(self._config_path.read_text(encoding="utf-8"))
             saved_key = str(data.get("api_key", "")).strip()
             saved_model = str(data.get("model", "")).strip()
-            if saved_key:
+            if not self._api_key and saved_key:
                 self._api_key = saved_key
             if saved_model:
-                self._model = saved_model
+                self._model = "gemini-3.5-flash" if saved_model == "gemini-2.5-flash" else saved_model
         except Exception:
             pass
 
@@ -130,27 +132,47 @@ class GeminiVisionAssistant:
             },
         }
 
-        url = _GEMINI_ENDPOINT.format(model=self._model)
-        try:
-            with httpx.Client(timeout=self._timeout) as client:
-                resp = client.post(
-                    url,
-                    headers={"x-goog-api-key": self._api_key},
-                    json=payload,
+        models_to_try: list[str] = [self._model]
+        for fb in ("gemini-3.5-flash", "gemini-3.5-flash-lite"):
+            if fb not in models_to_try:
+                models_to_try.append(fb)
+
+        resp: httpx.Response | None = None
+        used_model = self._model
+        last_exc: str | None = None
+
+        for candidate_model in models_to_try:
+            used_model = candidate_model
+            url = _GEMINI_ENDPOINT.format(model=candidate_model)
+            try:
+                with httpx.Client(timeout=self._timeout) as client:
+                    resp = client.post(
+                        url,
+                        headers={"x-goog-api-key": self._api_key},
+                        json=payload,
+                    )
+                last_exc = None
+                if resp.status_code in (404, 503):
+                    continue
+                break
+            except httpx.TimeoutException:
+                last_exc = "timeout"
+                resp = None
+                continue
+            except Exception:
+                return GeminiVisionReply(
+                    text="Could not reach Gemini Vision. Please check your internet connection.",
+                    model=used_model,
+                    ok=False,
+                    error_reason="network_error",
                 )
-        except httpx.TimeoutException:
+
+        if resp is None:
             return GeminiVisionReply(
                 text="Gemini Vision timed out. Please try asking again.",
-                model=self._model,
+                model=used_model,
                 ok=False,
-                error_reason="timeout",
-            )
-        except Exception:
-            return GeminiVisionReply(
-                text="Could not reach Gemini Vision. Please check your internet connection.",
-                model=self._model,
-                ok=False,
-                error_reason="network_error",
+                error_reason=last_exc or "timeout",
             )
 
         if resp.status_code in (400, 401, 403):
