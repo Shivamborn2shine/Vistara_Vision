@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import threading
 import time
 from typing import Annotated, Any
 
@@ -95,6 +96,13 @@ class AppContainer:
         self.last_spoken_response: str = "Vistara Vision is ready."
         self.public_url: str | None = settings.public_url
         self.start_time = time.monotonic()
+        self._currency_lock = threading.Lock()
+        self.currency_seq: int = 0
+
+    def next_currency_seq(self) -> int:
+        with self._currency_lock:
+            self.currency_seq += 1
+            return self.currency_seq
 
 
 def _get_lan_ip() -> str:
@@ -459,13 +467,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/vision/currency")
     def analyze_currency() -> dict[str, Any]:
+        my_seq = c.next_currency_seq()
         frame = _require_frame()
         # Use detector boxes (e.g. 'book' / rectangular held objects) as priority note crops
         detections = c.detector.detect(frame)
         candidate_boxes = [
             d.box for d in detections if d.label in ("book", "cell phone", "remote", "handbag")
         ]
-        res = c.currency.analyze([frame], candidate_boxes=candidate_boxes or None)
+        res = c.currency.analyze(
+            [frame],
+            candidate_boxes=candidate_boxes or None,
+            cancel_check=lambda: c.currency_seq != my_seq,
+        )
         spoken = f"{res.guidance} {res.authenticity_disclaimer}"
         c.last_spoken_response = spoken
         return {

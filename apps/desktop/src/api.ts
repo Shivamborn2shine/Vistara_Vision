@@ -152,10 +152,10 @@ export const api = {
     request<{ spoken_response: string; full_text: string }>("/api/v1/vision/ocr", {
       method: "POST"
     }),
-  analyzeCurrency: () =>
+  analyzeCurrency: (signal?: AbortSignal) =>
     request<{ spoken_response: string; total_inr: number; distinct_count: number; abstained: boolean }>(
       "/api/v1/vision/currency",
-      { method: "POST" }
+      { method: "POST", signal }
     ),
   listObjects: () => request<LearnedObject[]>("/api/v1/objects"),
   teachObject: (label: string, ownerNote?: string) =>

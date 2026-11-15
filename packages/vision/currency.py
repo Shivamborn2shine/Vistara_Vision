@@ -3,7 +3,7 @@ from __future__ import annotations
 import colorsys
 import io
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -171,7 +171,17 @@ class INRCurrencyAnalyzer:
         frames: Sequence[CameraFrame],
         injected_candidates: Sequence[CurrencyNoteCandidate] | None = None,
         candidate_boxes: Sequence[BoundingBox] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> CurrencyAnalysisResult:
+        if cancel_check and cancel_check():
+            return CurrencyAnalysisResult(
+                notes=[],
+                distinct_count=0,
+                total_inr=0,
+                abstained=True,
+                uncertainty_reason="cancelled",
+                guidance="Currency check superseded by a newer request.",
+            )
         if not frames and not injected_candidates:
             return CurrencyAnalysisResult(
                 notes=[],
@@ -197,8 +207,14 @@ class INRCurrencyAnalyzer:
         raw_candidates: list[CurrencyNoteCandidate] = list(injected_candidates or [])
         if not raw_candidates and frames:
             for frame in frames:
+                if cancel_check and cancel_check():
+                    break
                 raw_candidates.extend(
-                    self._analyze_single_frame(frame, candidate_boxes=candidate_boxes)
+                    self._analyze_single_frame(
+                        frame,
+                        candidate_boxes=candidate_boxes,
+                        cancel_check=cancel_check,
+                    )
                 )
 
         if not raw_candidates:
@@ -253,17 +269,22 @@ class INRCurrencyAnalyzer:
         self,
         frame: CameraFrame,
         candidate_boxes: Sequence[BoundingBox] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> list[CurrencyNoteCandidate]:
+        if cancel_check and cancel_check():
+            return []
         img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("RGB")
         # Prefer YOLOv8n-currency bounding boxes when available
         yolo_hits = self._detect_yolo_note_boxes(img)
+        if cancel_check and cancel_check():
+            return []
         merged_boxes: list[BoundingBox] = [b for b, _, _ in yolo_hits]
         for b in candidate_boxes or []:
             if all(_box_iou(b, mb) < 0.45 for mb in merged_boxes):
                 merged_boxes.append(b)
 
-        ocr_hits = self._detect_via_ocr(img, merged_boxes or None)
-        if ocr_hits:
+        ocr_hits = self._detect_via_ocr(img, merged_boxes or None, cancel_check=cancel_check)
+        if ocr_hits or (cancel_check and cancel_check()):
             return ocr_hits
 
         if merged_boxes:
@@ -289,6 +310,7 @@ class INRCurrencyAnalyzer:
         self,
         img: Image.Image,
         candidate_boxes: Sequence[BoundingBox] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> list[CurrencyNoteCandidate]:
         ocr = self._get_ocr()
         if ocr is None:
@@ -305,10 +327,14 @@ class INRCurrencyAnalyzer:
 
         found: list[CurrencyNoteCandidate] = []
         for crop_img, box in crops:
+            if cancel_check and cancel_check():
+                return []
             enhanced = ImageEnhance.Contrast(crop_img).enhance(1.4)
-            for angle in (0, 90, 270):
+            for angle in (0, 90):
+                if cancel_check and cancel_check():
+                    return []
                 rot = enhanced.rotate(angle, expand=True) if angle else enhanced
-                if rot.width < 900:
+                if rot.width < 480:
                     rot = rot.resize((rot.width * 2, rot.height * 2), Image.Resampling.BILINEAR)
                 try:
                     res, _ = ocr(np.asarray(rot))

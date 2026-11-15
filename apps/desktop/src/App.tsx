@@ -64,6 +64,7 @@ export function App() {
   const hiddenVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const announcedPairingTokenRef = useRef<string | null>(null);
+  const currencyAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     continuousMicRef.current = continuousMic;
@@ -298,10 +299,22 @@ export function App() {
   };
 
   const handleCurrency = async () => {
+    if (currencyAbortRef.current) {
+      currencyAbortRef.current.abort();
+    }
+    stopSpeaking();
+    const controller = new AbortController();
+    currencyAbortRef.current = controller;
+    setAnnouncement("Checking currency...");
     try {
-      const res = await api.analyzeCurrency();
-      speak(res.spoken_response);
+      const res = await api.analyzeCurrency(controller.signal);
+      if (currencyAbortRef.current === controller) {
+        speak(res.spoken_response);
+      }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
+      }
       speak(err instanceof Error ? err.message : "Could not analyze currency.");
     }
   };
