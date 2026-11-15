@@ -196,6 +196,18 @@ class VistaraLauncherApp:
             self.process.terminate()
             self.log("Stopped local Vistara backend.")
         self.process = None
+        if os.name == "nt":
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | "
+                    "ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }",
+                ],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+            )
         self.status_var.set("Status: Backend Stopped")
 
     def on_close(self) -> None:
