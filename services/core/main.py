@@ -4,6 +4,7 @@ import asyncio
 import socket
 import threading
 import time
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import (
@@ -733,11 +734,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             c.last_spoken_response = msg
             return {"intent": intent.value, "spoken_response": msg}
 
+        if intent == CommandIntent.GREETING:
+            msg = (
+                "Hello! Vistara Vision is ready. Hold the Speak button and ask: "
+                "What is in front of me, Identify currency, Read this, or What time is it."
+            )
+            c.last_spoken_response = msg
+            return {"intent": intent.value, "spoken_response": msg}
+
+        if intent == CommandIntent.GET_TIME:
+            now = datetime.now()
+            msg = now.strftime("It is %I:%M %p on %A, %B %d, %Y.").replace(" 0", " ")
+            c.last_spoken_response = msg
+            return {"intent": intent.value, "spoken_response": msg}
+
+        if intent == CommandIntent.CHECK_LIGHTING:
+            frame = _require_frame()
+            brightness, issue = assess_frame_lighting(frame)
+            msg = issue or f"Lighting looks good with brightness level {int(brightness)} out of 255."
+            c.last_spoken_response = msg
+            return {"intent": intent.value, "spoken_response": msg}
+
         if intent == CommandIntent.HELP:
             msg = (
-                "You can say: Start vision, What is in front of me, Read this, Count these notes, "
-                "What color is this, Is there a bottle, Learn this as my bottle, Where was my keys, "
-                "Connect phone, or Stop camera."
+                "You can say: What is in front of me, Read this, Identify currency, "
+                "What color is this, How is the light, What time is it, Is there a bottle, "
+                "Learn this as my bottle, Where was my keys, Repeat, Stop speaking, "
+                "Start vision, Connect phone, or Stop camera."
             )
             return {"intent": intent.value, "spoken_response": msg}
 

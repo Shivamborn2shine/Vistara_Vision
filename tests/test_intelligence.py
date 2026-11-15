@@ -40,3 +40,22 @@ def test_conversational_presence_color_and_help_commands(tmp_path: Path) -> None
     r_known = client.post("/api/v1/commands", json={"text": "What objects do you know?"})
     assert r_known.status_code == 200
     assert "learned objects" in r_known.json()["spoken_response"].lower() or "not taught" in r_known.json()["spoken_response"].lower()
+
+
+def test_general_voice_commands(tmp_path: Path) -> None:
+    app = create_app(Settings(data_dir=tmp_path))
+    client = TestClient(app)
+
+    r_hi = client.post("/api/v1/commands", json={"text": "Hello"})
+    assert r_hi.status_code == 200
+    assert r_hi.json()["intent"] == "greeting"
+
+    r_time = client.post("/api/v1/commands", json={"text": "What time is it?"})
+    assert r_time.status_code == 200
+    assert r_time.json()["intent"] == "get_time"
+    assert "it is " in r_time.json()["spoken_response"].lower()
+
+    client.post("/api/v1/cameras/start", json={"source_id": "mock-cam-0"})
+    r_light = client.post("/api/v1/commands", json={"text": "How is the light?"})
+    assert r_light.status_code == 200
+    assert r_light.json()["intent"] == "check_lighting"

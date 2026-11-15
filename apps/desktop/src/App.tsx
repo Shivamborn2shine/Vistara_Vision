@@ -20,11 +20,16 @@ declare global {
 
 interface SpeechRecognitionLike {
   lang: string;
+  continuous?: boolean;
   interimResults: boolean;
   maxAlternatives: number;
   start: () => void;
   stop: () => void;
-  onresult: ((ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onresult:
+    | ((ev: {
+        results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal?: boolean }>;
+      }) => void)
+    | null;
   onerror: ((ev: { error: string }) => void) | null;
   onend: (() => void) | null;
 }
@@ -39,6 +44,7 @@ export function App() {
   const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
   const [speechRate, setSpeechRate] = useState<number>(1.0);
   const [listening, setListening] = useState<boolean>(false);
+  const [holdingToSpeak, setHoldingToSpeak] = useState<boolean>(false);
   const [continuousMic, setContinuousMic] = useState<boolean>(false);
   const [lastHeard, setLastHeard] = useState<string>("");
   const [commandText, setCommandText] = useState<string>("");
@@ -57,6 +63,10 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const pttActiveRef = useRef<boolean>(false);
+  const pttTranscriptRef = useRef<string>("");
+  const pttPendingSubmitRef = useRef<boolean>(false);
+  const pttSubmitTimerRef = useRef<number | null>(null);
   const continuousMicRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
   const browserStreamRef = useRef<MediaStream | null>(null);
@@ -424,6 +434,148 @@ export function App() {
     rec.start();
   }, [handleCommandSubmit, speak]);
 
+  const playMicTone = useCallback((freq: number, durationMs: number) => {
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.value = 0.08;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + durationMs / 1000);
+      window.setTimeout(() => {
+        void ctx.close().catch(() => {});
+      }, durationMs + 50);
+    } catch {
+      // Ignore audio cue errors if browser blocks AudioContext
+    }
+  }, []);
+
+  const flushPttCommand = useCallback(() => {
+    if (pttSubmitTimerRef.current !== null) {
+      window.clearTimeout(pttSubmitTimerRef.current);
+      pttSubmitTimerRef.current = null;
+    }
+    if (!pttPendingSubmitRef.current) return;
+    pttPendingSubmitRef.current = false;
+    const finalText = pttTranscriptRef.current.trim();
+    pttTranscriptRef.current = "";
+    if (finalText) {
+      setLastHeard(finalText);
+      setCommandText(finalText);
+      void handleCommandSubmit(finalText);
+    } else {
+      setAnnouncement("No voice command heard while holding the button.");
+    }
+  }, [handleCommandSubmit]);
+
+  const launchPttRecognition = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      pttActiveRef.current = false;
+      setHoldingToSpeak(false);
+      speak("Browser speech recognition is unavailable. Use Chrome or Edge, or type in the command box.");
+      return;
+    }
+    const rec = new SR();
+    rec.lang = "en-IN";
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    recognitionRef.current = rec;
+    setListening(true);
+
+    let sessionCommitted = pttTranscriptRef.current;
+
+    rec.onresult = (ev) => {
+      const parts: string[] = [];
+      for (let i = 0; i < ev.results.length; i += 1) {
+        const piece = ev.results[i]?.[0]?.transcript ?? "";
+        if (piece.trim()) parts.push(piece.trim());
+      }
+      const combined = [sessionCommitted, parts.join(" ")].filter(Boolean).join(" ").trim();
+      pttTranscriptRef.current = combined;
+      if (combined) {
+        setLastHeard(combined);
+        setCommandText(combined);
+      }
+    };
+
+    rec.onerror = (ev) => {
+      if (ev.error === "not-allowed") {
+        pttActiveRef.current = false;
+        pttPendingSubmitRef.current = false;
+        setHoldingToSpeak(false);
+        setListening(false);
+        recognitionRef.current = null;
+        speak("Microphone permission was denied. Please allow microphone access in your browser.");
+      }
+    };
+
+    rec.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+      if (pttActiveRef.current) {
+        sessionCommitted = pttTranscriptRef.current;
+        launchPttRecognition();
+        return;
+      }
+      flushPttCommand();
+    };
+
+    rec.start();
+  }, [flushPttCommand, speak]);
+
+  const startHoldToSpeak = useCallback(() => {
+    if (pttActiveRef.current) return;
+    stopSpeaking();
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+    pttTranscriptRef.current = "";
+    pttPendingSubmitRef.current = false;
+    pttActiveRef.current = true;
+    setHoldingToSpeak(true);
+    setCommandText("");
+    playMicTone(660, 80);
+    launchPttRecognition();
+  }, [launchPttRecognition, playMicTone, stopSpeaking]);
+
+  const stopHoldToSpeak = useCallback(() => {
+    if (!pttActiveRef.current) return;
+    pttActiveRef.current = false;
+    pttPendingSubmitRef.current = true;
+    setHoldingToSpeak(false);
+    playMicTone(440, 80);
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      pttSubmitTimerRef.current = window.setTimeout(() => {
+        flushPttCommand();
+      }, 650);
+    } else {
+      flushPttCommand();
+    }
+  }, [flushPttCommand, playMicTone]);
+
+  useEffect(() => {
+    if (!holdingToSpeak) return;
+    const onRelease = () => {
+      stopHoldToSpeak();
+    };
+    window.addEventListener("pointerup", onRelease);
+    window.addEventListener("pointercancel", onRelease);
+    return () => {
+      window.removeEventListener("pointerup", onRelease);
+      window.removeEventListener("pointercancel", onRelease);
+    };
+  }, [holdingToSpeak, stopHoldToSpeak]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.altKey) return;
@@ -509,11 +661,42 @@ export function App() {
             </button>
             <button
               type="button"
-              className={`btn ${listening ? "btn-mic-active" : ""}`}
+              className={`btn ${holdingToSpeak ? "btn-hold-mic-active" : "btn-hold-mic"}`}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                startHoldToSpeak();
+              }}
+              onPointerUp={(e) => {
+                e.preventDefault();
+                stopHoldToSpeak();
+              }}
+              onPointerCancel={() => stopHoldToSpeak()}
+              onKeyDown={(e) => {
+                if ((e.key === " " || e.key === "Enter") && !e.repeat) {
+                  e.preventDefault();
+                  startHoldToSpeak();
+                }
+              }}
+              onKeyUp={(e) => {
+                if (e.key === " " || e.key === "Enter") {
+                  e.preventDefault();
+                  stopHoldToSpeak();
+                }
+              }}
+              onContextMenu={(e) => e.preventDefault()}
+              aria-pressed={holdingToSpeak}
+              aria-label="Hold to speak voice command"
+              title="Press and hold while speaking; release to run command"
+            >
+              {holdingToSpeak ? "Listening... Release to Send" : "Hold to Speak"}
+            </button>
+            <button
+              type="button"
+              className={`btn ${listening && !holdingToSpeak ? "btn-mic-active" : ""}`}
               onClick={startVoiceRecognition}
               title="Shortcut: Alt+M"
             >
-              {listening ? "Listening... (Click to Stop)" : "Speak (Alt+M)"}
+              {listening && !holdingToSpeak ? "Listening... (Click to Stop)" : "Speak (Alt+M)"}
             </button>
             <label style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
               <input

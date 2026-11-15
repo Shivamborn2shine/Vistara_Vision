@@ -273,6 +273,25 @@ input[type="range"] {
   border-color: #22c55e;
 }
 
+.btn-hold-mic {
+  background: #1e293b;
+  color: #f8fafc;
+  border: 2px solid #38bdf8;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.btn-hold-mic-active {
+  background: #ef4444;
+  color: #ffffff;
+  border: 2px solid #fca5a5;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.35);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .muted {
   color: var(--muted);
   font-size: 0.92rem;
