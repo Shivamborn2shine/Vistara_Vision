@@ -151,7 +151,11 @@ export function App() {
         const st = await api.pairingStatus(pairing.token);
         if (st.state === "connected") {
           setPairing((prev) => (prev ? { ...prev, state: "connected" } : null));
+          if (st.camera_source_id) {
+            setSelectedCamera(st.camera_source_id);
+          }
           setCameraStatus("active");
+          setPreviewTick((t) => t + 1);
           speak("Phone camera connected and active.");
           void refreshLists();
           window.clearInterval(id);

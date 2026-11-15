@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import time
 from typing import Annotated, Any
 
@@ -90,6 +91,19 @@ class AppContainer:
         self.start_time = time.monotonic()
 
 
+def _get_lan_ip() -> str:
+    """Return the laptop's primary LAN IPv4 address for phone pairing on the same Wi-Fi."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return str(ip)
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
 def _phone_sender_html(token: str, short_code: str) -> str:
     return f"""<!doctype html>
 <html lang="en">
@@ -114,6 +128,10 @@ def _phone_sender_html(token: str, short_code: str) -> str:
     <p>Pairing code: <strong>{short_code}</strong></p>
     <p>Your camera will only turn on after you explicitly tap <strong>Allow Camera &amp; Connect</strong> below.</p>
     <button id="connectBtn" class="primary">Allow Camera &amp; Connect</button>
+    <label id="fallbackLabel" class="primary" style="display:none; text-align:center; padding:1rem; border-radius:10px; font-weight:700; cursor:pointer; margin-top:0.75rem;">
+      Capture &amp; Send Photo
+      <input id="photoInput" type="file" accept="image/*" capture="environment" style="display:none;" />
+    </label>
     <button id="stopBtn" class="danger" style="display:none;">Stop Streaming &amp; Disconnect</button>
     <div id="status" class="status" role="status" aria-live="polite">Waiting for your permission.</div>
     <video id="preview" autoplay playsinline muted style="display:none;"></video>
@@ -123,31 +141,54 @@ def _phone_sender_html(token: str, short_code: str) -> str:
     const token = {token!r};
     const statusEl = document.getElementById('status');
     const connectBtn = document.getElementById('connectBtn');
+    const fallbackLabel = document.getElementById('fallbackLabel');
+    const photoInput = document.getElementById('photoInput');
     const stopBtn = document.getElementById('stopBtn');
     const video = document.getElementById('preview');
     const canvas = document.getElementById('canvas');
     let stream = null;
     let timer = null;
 
+    async function authorizeConnection() {{
+      const res = await fetch(`/api/v1/pairing/connect/${{token}}`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ consent_granted: true }})
+      }});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.message || 'Connection rejected');
+    }}
+
     connectBtn.onclick = async () => {{
       try {{
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+          await authorizeConnection();
+          connectBtn.style.display = 'none';
+          fallbackLabel.style.display = 'block';
+          stopBtn.style.display = 'block';
+          statusEl.textContent = 'Connected (HTTP photo mode). Tap Capture & Send Photo to stream frames.';
+          return;
+        }}
         stream = await navigator.mediaDevices.getUserMedia({{ video: {{ facingMode: 'environment' }}, audio: false }});
-        const res = await fetch(`/api/v1/pairing/connect/${{token}}`, {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ consent_granted: true }})
-        }});
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || data.message || 'Connection rejected');
+        await authorizeConnection();
         video.srcObject = stream;
         video.style.display = 'block';
         connectBtn.style.display = 'none';
         stopBtn.style.display = 'block';
         statusEl.textContent = 'Connected. Streaming frames to your laptop.';
-        timer = setInterval(sendFrame, 750);
+        timer = setInterval(sendFrame, 350);
       }} catch (err) {{
         statusEl.textContent = 'Could not connect: ' + err.message;
       }}
+    }};
+
+    photoInput.onchange = async (e) => {{
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append('file', file, 'frame.jpg');
+      const r = await fetch(`/api/v1/pairing/frame/${{token}}`, {{ method: 'POST', body: form }});
+      statusEl.textContent = r.ok ? 'Photo sent to laptop!' : 'Failed to send photo (session ended).';
     }};
 
     async function sendFrame() {{
@@ -616,6 +657,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/pairing/create")
     def create_pairing(request: Request) -> dict[str, Any]:
         base_url = str(request.base_url).rstrip("/")
+        if "127.0.0.1" in base_url or "localhost" in base_url:
+            lan_ip = _get_lan_ip()
+            base_url = base_url.replace("127.0.0.1", lan_ip).replace("localhost", lan_ip)
         sess, join_url, qr_data_uri = c.pairing.create_pairing(base_url=base_url)
         msg = f"Phone pairing ready. Scan the QR code or open the link with code {sess.short_code}."
         c.last_spoken_response = msg
