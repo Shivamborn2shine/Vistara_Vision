@@ -736,6 +736,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if intent == CommandIntent.DESCRIBE_COLOR:
             frame = _require_frame()
+            if c.gemini.configured:
+                known_names = [o.label for o in c.memory.list_objects()]
+                reply = c.gemini.ask(req.text, frame=frame, known_objects=known_names)
+                if reply.ok:
+                    c.last_spoken_response = reply.text
+                    return {
+                        "intent": "ai_vision",
+                        "spoken_response": reply.text,
+                        "model": reply.model,
+                        "ok": True,
+                    }
             color_name = describe_dominant_color(frame)
             msg = f"The main color in front of the camera looks {color_name}."
             c.last_spoken_response = msg
@@ -746,6 +757,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not target:
                 return {"intent": intent.value, "spoken_response": "What item should I look for?"}
             frame = _require_frame()
+            if c.gemini.configured and "how many" in req.text.lower():
+                known_names = [o.label for o in c.memory.list_objects()]
+                reply = c.gemini.ask(req.text, frame=frame, known_objects=known_names)
+                if reply.ok:
+                    c.last_spoken_response = reply.text
+                    return {
+                        "intent": "ai_vision",
+                        "spoken_response": reply.text,
+                        "model": reply.model,
+                        "ok": True,
+                    }
             profiles = c.memory.load_enrolled_profiles()
             detections, _ = c.pipeline.process_frame(frame, profiles=profiles, require_stability=1)
             matches = [d for d in detections if target in d.label.lower()]
@@ -757,6 +779,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 c.last_spoken_response = msg
                 return {"intent": intent.value, "present": True, "spoken_response": msg}
+            if c.gemini.configured:
+                known_names = [o.label for o in c.memory.list_objects()]
+                reply = c.gemini.ask(req.text, frame=frame, known_objects=known_names)
+                if reply.ok:
+                    c.last_spoken_response = reply.text
+                    return {
+                        "intent": "ai_vision",
+                        "spoken_response": reply.text,
+                        "model": reply.model,
+                        "ok": True,
+                    }
             mem_ans = c.answering.answer_last_seen(target)
             msg = (
                 f"I do not see {target} in front of the camera right now. "
