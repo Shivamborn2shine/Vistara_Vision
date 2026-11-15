@@ -4,6 +4,7 @@ import colorsys
 import io
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,10 @@ from packages.vision.contracts import (
 from packages.vision.detector import assess_frame_lighting
 
 SUPPORTED_INR_DENOMINATIONS = (10, 20, 50, 100, 200, 500, 2000)
+_WEIGHTS_DIR = Path(__file__).resolve().parents[2] / "models" / "weights"
+_YOLO_CURRENCY_PATH = _WEIGHTS_DIR / "yolov8n_currency_best.onnx"
+_CNN_CURRENCY_PATH = _WEIGHTS_DIR / "mobilenetv3_currency.onnx"
+_HF_CLASSES = (10, 100, 20, 200, 2000, 50, 500)
 
 # Normalized RGB ratios (r/sum, g/sum, b/sum) and HSV hue ranges (0..360) for modern INR notes
 _INR_PROFILES: dict[int, dict[str, Any]] = {
@@ -61,12 +66,93 @@ class INRCurrencyAnalyzer:
     3. Multi-frame de-duplication, lighting/confidence abstention, and non-authentication safety
     """
 
-    model_version = "inr-ocr-hsv-v3"
+    model_version = "inr-yolo-cnn-ocr-hsv-v4"
 
     def __init__(self, confidence_threshold: float = 0.68) -> None:
         self.confidence_threshold = confidence_threshold
         self._ocr: Any = None
         self._ocr_checked = False
+        self._yolo: Any = None
+        self._cnn: Any = None
+        self._models_checked = False
+
+    def _init_onnx_models(self) -> None:
+        if self._models_checked:
+            return
+        self._models_checked = True
+        try:
+            import onnxruntime as ort  # type: ignore[import-not-found]
+
+            if _YOLO_CURRENCY_PATH.exists():
+                self._yolo = ort.InferenceSession(
+                    str(_YOLO_CURRENCY_PATH), providers=["CPUExecutionProvider"]
+                )
+            if _CNN_CURRENCY_PATH.exists():
+                self._cnn = ort.InferenceSession(
+                    str(_CNN_CURRENCY_PATH), providers=["CPUExecutionProvider"]
+                )
+        except Exception:
+            self._yolo = None
+            self._cnn = None
+
+    def _detect_yolo_note_boxes(self, img: Image.Image) -> list[tuple[BoundingBox, int, float]]:
+        self._init_onnx_models()
+        if self._yolo is None:
+            return []
+        try:
+            scale = min(416.0 / img.width, 416.0 / img.height)
+            nw, nh = int(round(img.width * scale)), int(round(img.height * scale))
+            pad_x, pad_y = (416 - nw) // 2, (416 - nh) // 2
+            canvas = Image.new("RGB", (416, 416), (114, 114, 114))
+            canvas.paste(img.resize((nw, nh), Image.Resampling.BILINEAR), (pad_x, pad_y))
+            arr = np.asarray(canvas, dtype=np.float32) / 255.0
+            inp = np.transpose(arr, (2, 0, 1))[None, ...]
+            out = self._yolo.run(None, {self._yolo.get_inputs()[0].name: inp})[0][0].T
+            scores = out[:, 4:]
+            best_cls = scores.argmax(axis=1)
+            best_conf = scores.max(axis=1)
+            hits: list[tuple[BoundingBox, int, float]] = []
+            for idx in np.where(best_conf >= 0.45)[0]:
+                cx, cy, bw, bh = [float(v) for v in out[idx, :4]]
+                x1 = max(0.0, min(1.0, ((cx - bw / 2.0) - pad_x) / nw))
+                y1 = max(0.0, min(1.0, ((cy - bh / 2.0) - pad_y) / nh))
+                x2 = max(x1 + 0.02, min(1.0, ((cx + bw / 2.0) - pad_x) / nw))
+                y2 = max(y1 + 0.02, min(1.0, ((cy + bh / 2.0) - pad_y) / nh))
+                hits.append(
+                    (
+                        BoundingBox(round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3)),
+                        _HF_CLASSES[int(best_cls[idx])],
+                        float(best_conf[idx]),
+                    )
+                )
+            # NMS by IoU
+            hits.sort(key=lambda h: h[2], reverse=True)
+            kept: list[tuple[BoundingBox, int, float]] = []
+            for b, d, c in hits:
+                if all(_box_iou(b, kb) < 0.45 for kb, _, _ in kept):
+                    kept.append((b, d, c))
+            return kept
+        except Exception:
+            return []
+
+    def _classify_with_cnn(self, crop: Image.Image) -> tuple[int, float] | None:
+        self._init_onnx_models()
+        if self._cnn is None:
+            return None
+        try:
+            resized = crop.resize((224, 224), Image.Resampling.BILINEAR)
+            arr = np.asarray(resized, dtype=np.float32) / 255.0
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            arr = (arr - mean) / std
+            inp = np.transpose(arr, (2, 0, 1))[None, ...]
+            logits = self._cnn.run(None, {self._cnn.get_inputs()[0].name: inp})[0][0]
+            probs = np.exp(logits - logits.max())
+            probs /= probs.sum()
+            idx = int(probs.argmax())
+            return _HF_CLASSES[idx], float(probs[idx])
+        except Exception:
+            return None
 
     def _get_ocr(self) -> Any:
         if self._ocr_checked:
@@ -169,20 +255,25 @@ class INRCurrencyAnalyzer:
         candidate_boxes: Sequence[BoundingBox] | None = None,
     ) -> list[CurrencyNoteCandidate]:
         img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("RGB")
-        ocr_hits = self._detect_via_ocr(img, candidate_boxes)
+        # Prefer YOLOv8n-currency bounding boxes when available
+        yolo_hits = self._detect_yolo_note_boxes(img)
+        merged_boxes: list[BoundingBox] = [b for b, _, _ in yolo_hits]
+        for b in candidate_boxes or []:
+            if all(_box_iou(b, mb) < 0.45 for mb in merged_boxes):
+                merged_boxes.append(b)
+
+        ocr_hits = self._detect_via_ocr(img, merged_boxes or None)
         if ocr_hits:
             return ocr_hits
 
-        # When no OCR hit is found, inspect detector-supplied tight boxes (or center fallback)
-        if candidate_boxes:
+        if merged_boxes:
             box_results: list[CurrencyNoteCandidate] = []
-            for idx, box in enumerate(candidate_boxes):
+            for idx, box in enumerate(merged_boxes):
                 cand = self._classify_crop_hsv(img, box, track_id=f"det-{idx}", allow_grey_500=True)
                 if cand is not None:
                     box_results.append(cand)
             return box_results
 
-        # Fallback: pick single best match among center windows (never emit duplicate 500s on background)
         windows = [
             BoundingBox(0.20, 0.22, 0.80, 0.78),
             BoundingBox(0.32, 0.55, 0.68, 0.90),
@@ -326,6 +417,12 @@ class INRCurrencyAnalyzer:
 
         if best_denom not in SUPPORTED_INR_DENOMINATIONS or best_score < 0.55:
             return None
+
+        cnn_res = self._classify_with_cnn(crop)
+        if cnn_res is not None:
+            cnn_denom, cnn_conf = cnn_res
+            if cnn_denom == best_denom and cnn_conf >= 0.65:
+                best_score = min(0.97, max(best_score, cnn_conf) + 0.08)
 
         return CurrencyNoteCandidate(
             denomination_inr=best_denom,
