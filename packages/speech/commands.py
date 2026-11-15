@@ -18,6 +18,10 @@ class CommandIntent(StrEnum):
     REPEAT = "repeat"
     STOP_SPEAKING = "stop_speaking"
     FORGET_LAST = "forget_last"
+    CHECK_PRESENCE = "check_presence"
+    DESCRIBE_COLOR = "describe_color"
+    LIST_KNOWN = "list_known"
+    HELP = "help"
     UNKNOWN = "unknown"
 
 
@@ -35,7 +39,36 @@ def parse_voice_command(text: str) -> ParsedCommand:
     low = re.sub(r"[?.!,]+$", "", low).strip()
 
     if not low:
-        return ParsedCommand(intent=CommandIntent.UNKNOWN, raw_text=raw)
+        if any(k in low for k in ("what color", "what colour", "which color", "which colour")):
+        return ParsedCommand(intent=CommandIntent.DESCRIBE_COLOR, raw_text=raw)
+
+    if any(
+        k in low
+        for k in (
+            "what objects do you know",
+            "list learned objects",
+            "what do you remember",
+            "what did you see earlier",
+        )
+    ):
+        return ParsedCommand(intent=CommandIntent.LIST_KNOWN, raw_text=raw)
+
+    if low in ("help", "what can you do", "commands"):
+        return ParsedCommand(intent=CommandIntent.HELP, raw_text=raw)
+
+    # "Is there a bottle?" / "Do you see my keys?" / "How many people are there?"
+    m_pres = re.search(
+        r"(?:is there|are there|do you see|can you see|how many)\s+(?:a\s+|an\s+|any\s+|my\s+|the\s+)?(.+?)(?:\s+here|\s+in front of me|\s+around)?$",
+        low,
+    )
+    if m_pres:
+        return ParsedCommand(
+            intent=CommandIntent.CHECK_PRESENCE,
+            argument=m_pres.group(1).strip(),
+            raw_text=raw,
+        )
+
+    return ParsedCommand(intent=CommandIntent.UNKNOWN, raw_text=raw)
 
     if any(k in low for k in ("stop speaking", "be quiet", "cancel speech", "shut up")):
         return ParsedCommand(intent=CommandIntent.STOP_SPEAKING, raw_text=raw)
@@ -98,6 +131,35 @@ def parse_voice_command(text: str) -> ParsedCommand:
         return ParsedCommand(
             intent=CommandIntent.ASK_MEMORY,
             argument=m_mem.group(1).strip(),
+            raw_text=raw,
+        )
+
+    if any(k in low for k in ("what color", "what colour", "which color", "which colour")):
+        return ParsedCommand(intent=CommandIntent.DESCRIBE_COLOR, raw_text=raw)
+
+    if any(
+        k in low
+        for k in (
+            "what objects do you know",
+            "list learned objects",
+            "what do you remember",
+            "what did you see earlier",
+        )
+    ):
+        return ParsedCommand(intent=CommandIntent.LIST_KNOWN, raw_text=raw)
+
+    if low in ("help", "what can you do", "commands"):
+        return ParsedCommand(intent=CommandIntent.HELP, raw_text=raw)
+
+    # "Is there a bottle?" / "Do you see my keys?" / "How many people are there?"
+    m_pres = re.search(
+        r"(?:is there|are there|do you see|can you see|how many)\s+(?:a\s+|an\s+|any\s+|my\s+|the\s+)?(.+?)(?:\s+here|\s+in front of me|\s+around)?$",
+        low,
+    )
+    if m_pres:
+        return ParsedCommand(
+            intent=CommandIntent.CHECK_PRESENCE,
+            argument=m_pres.group(1).strip(),
             raw_text=raw,
         )
 

@@ -201,13 +201,38 @@ class OnnxCocoObjectDetector:
             return self._fallback.detect(frame)
 
         img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("RGB")
-        # Resize to 320x240 for fast ~35ms CPU inference while preserving aspect
-        resized = img.resize((320, 240), Image.Resampling.BILINEAR)
+        # Pass 1: full frame
+        all_dets = self._run_on_crop(img, BoundingBox(0.0, 0.0, 1.0, 1.0), tag="full")
+
+        # Pass 2: center zoom crop (improves recall for smaller handheld/tabletop items)
+        center_box = BoundingBox(0.18, 0.18, 0.82, 0.82)
+        cw = int((center_box.x2 - center_box.x1) * img.width)
+        ch = int((center_box.y2 - center_box.y1) * img.height)
+        if cw >= 64 and ch >= 64:
+            crop = img.crop(
+                (
+                    int(center_box.x1 * img.width),
+                    int(center_box.y1 * img.height),
+                    int(center_box.x2 * img.width),
+                    int(center_box.y2 * img.height),
+                )
+            )
+            all_dets.extend(self._run_on_crop(crop, center_box, tag="zoom"))
+
+        deduped = self._nms_detections(all_dets, iou_threshold=0.50)
+        if not deduped:
+            return self._fallback.detect(frame)
+        return deduped
+
+    def _run_on_crop(self, crop: Image.Image, region: BoundingBox, tag: str) -> list[Detection]:
+        resized = crop.resize((320, 240), Image.Resampling.BILINEAR)
         arr = np.expand_dims(np.asarray(resized, dtype=np.uint8), axis=0)
 
         boxes, classes, scores, num_det = self._session.run(None, {self._input_name: arr})
         count = int(num_det[0]) if len(num_det) else len(scores[0])
 
+        rw = region.x2 - region.x1
+        rh = region.y2 - region.y1
         detections: list[Detection] = []
         for i in range(min(count, len(scores[0]))):
             score = float(scores[0][i])
@@ -216,10 +241,10 @@ class OnnxCocoObjectDetector:
             cls_id = int(classes[0][i])
             label = MSCOCO_90_LABELS.get(cls_id, f"object-{cls_id}")
             ymin, xmin, ymax, xmax = [float(v) for v in boxes[0][i]]
-            x1 = max(0.0, min(1.0, xmin))
-            y1 = max(0.0, min(1.0, ymin))
-            x2 = max(x1 + 0.01, min(1.0, xmax))
-            y2 = max(y1 + 0.01, min(1.0, ymax))
+            x1 = max(0.0, min(1.0, region.x1 + xmin * rw))
+            y1 = max(0.0, min(1.0, region.y1 + ymin * rh))
+            x2 = max(x1 + 0.01, min(1.0, region.x1 + xmax * rw))
+            y2 = max(y1 + 0.01, min(1.0, region.y1 + ymax * rh))
             detections.append(
                 Detection(
                     label=label,
@@ -231,11 +256,29 @@ class OnnxCocoObjectDetector:
                     ),
                     confidence=round(score, 3),
                     model_version=self.model_version,
-                    track_id=f"{label}-{i}",
+                    track_id=f"{tag}-{label}-{i}",
                 )
             )
-
-        if not detections:
-            return self._fallback.detect(frame)
-
         return detections
+
+    @staticmethod
+    def _nms_detections(detections: list[Detection], iou_threshold: float = 0.50) -> list[Detection]:
+        ordered = sorted(detections, key=lambda d: d.confidence, reverse=True)
+        kept: list[Detection] = []
+        for cand in ordered:
+            duplicate = False
+            for prev in kept:
+                if prev.label != cand.label:
+                    continue
+                ix1 = max(prev.box.x1, cand.box.x1)
+                iy1 = max(prev.box.y1, cand.box.y1)
+                ix2 = min(prev.box.x2, cand.box.x2)
+                iy2 = min(prev.box.y2, cand.box.y2)
+                inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                union = prev.box.area + cand.box.area - inter
+                if union > 1e-8 and (inter / union) >= iou_threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(cand)
+        return kept

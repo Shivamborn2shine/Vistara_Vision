@@ -23,7 +23,7 @@ from packages.memory.repository import MemoryRepository
 from packages.speech.commands import CommandIntent, parse_voice_command
 from packages.vision.camera import CameraManager, PhoneStreamCameraSource
 from packages.vision.coco_labels import OBJECT_KNOWLEDGE_HINTS
-from packages.vision.contracts import CameraInfo, CameraStatus
+from packages.vision.contracts import CameraInfo, CameraStatus, Detection
 from packages.vision.currency import INRCurrencyAnalyzer
 from packages.vision.detector import (
     OnnxCocoObjectDetector,
@@ -33,6 +33,7 @@ from packages.vision.detector import (
 from packages.vision.encoder import LocalHistogramVisualEncoder
 from packages.vision.ocr import LocalOCREngine
 from packages.vision.pipeline import BoundedFrameQueue, PerceptionPipeline
+from packages.vision.spatial import describe_dominant_color, narrate_scene
 from services.core.config import Settings
 from services.core.pairing import PhonePairingManager
 
@@ -392,23 +393,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         profiles = c.memory.load_enrolled_profiles()
         detections, stable = c.pipeline.process_frame(frame, profiles=profiles, require_stability=1)
 
+        # Smart fusion: if a handheld rectangular object ('book'/'remote') is actually an INR note,
+        # upgrade its label so "What do you see?" identifies currency naturally.
+        note_boxes = [
+            d.box for d in detections if d.label in ("book", "remote") and not d.is_personal_match
+        ]
+        if note_boxes and lighting_issue is None:
+            cur_res = c.currency.analyze([frame], candidate_boxes=note_boxes)
+            if not cur_res.abstained and cur_res.notes:
+                top_note = cur_res.notes[0]
+                fused: list[Detection] = []
+                replaced = False
+                for d in detections:
+                    if not replaced and d.label in ("book", "remote") and not d.is_personal_match:
+                        fused.append(
+                            Detection(
+                                label=f"Rs {top_note.denomination_inr} banknote",
+                                box=d.box,
+                                confidence=max(d.confidence, top_note.confidence),
+                                model_version=d.model_version,
+                                track_id=d.track_id,
+                            )
+                        )
+                        replaced = True
+                    else:
+                        fused.append(d)
+                detections = fused
+
         for obs in stable:
             source = "user_confirmed" if obs.object_id else "model_inferred"
             c.memory.write_observation(obs, label_source=source)
 
-        if lighting_issue:
-            spoken = lighting_issue
-        elif not detections:
-            spoken = "I do not see any distinct objects clearly in front of the camera. Try panning slowly."
-        else:
-            parts = []
-            for d in detections[:5]:
-                hint = OBJECT_KNOWLEDGE_HINTS.get(d.label, "")
-                hint_suffix = f" ({hint})" if hint else ""
-                parts.append(
-                    f"{d.label} ({describe_relative_position(d.box)}, {int(d.confidence * 100)}% confidence){hint_suffix}"
-                )
-            spoken = "In front of you, I see: " + "; ".join(parts) + "."
+        spoken = narrate_scene(detections, lighting_warning=lighting_issue)
 
         c.last_spoken_response = spoken
         return {
@@ -656,9 +672,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if intent == CommandIntent.PAIR_PHONE:
             return {"intent": intent.value, **create_pairing(request)}
 
+        if intent == CommandIntent.DESCRIBE_COLOR:
+            frame = _require_frame()
+            color_name = describe_dominant_color(frame)
+            msg = f"The main color in front of the camera looks {color_name}."
+            c.last_spoken_response = msg
+            return {"intent": intent.value, "color": color_name, "spoken_response": msg}
+
+        if intent == CommandIntent.CHECK_PRESENCE:
+            target = (parsed.argument or "").strip()
+            if not target:
+                return {"intent": intent.value, "spoken_response": "What item should I look for?"}
+            frame = _require_frame()
+            profiles = c.memory.load_enrolled_profiles()
+            detections, _ = c.pipeline.process_frame(frame, profiles=profiles, require_stability=1)
+            matches = [d for d in detections if target in d.label.lower()]
+            if matches:
+                first = matches[0]
+                msg = (
+                    f"Yes, I see {len(matches)} {first.label} "
+                    f"({describe_relative_position(first.box)}, {int(first.confidence * 100)}% confidence)."
+                )
+                c.last_spoken_response = msg
+                return {"intent": intent.value, "present": True, "spoken_response": msg}
+            mem_ans = c.answering.answer_last_seen(target)
+            msg = (
+                f"I do not see {target} in front of the camera right now. "
+                + (mem_ans.spoken_answer if mem_ans.found else "It is not in saved memory either.")
+            )
+            c.last_spoken_response = msg
+            return {"intent": intent.value, "present": False, "spoken_response": msg}
+
+        if intent == CommandIntent.LIST_KNOWN:
+            objs = c.memory.list_objects()
+            recent = c.memory.list_recent_observations(limit=5)
+            obj_part = (
+                "Learned objects: " + ", ".join(o.label for o in objs) + "."
+                if objs
+                else "You have not taught any personal objects yet."
+            )
+            obs_part = (
+                " Recent sightings: " + ", ".join(r.label for r in recent[:3]) + "."
+                if recent
+                else ""
+            )
+            msg = obj_part + obs_part
+            c.last_spoken_response = msg
+            return {"intent": intent.value, "spoken_response": msg}
+
+        if intent == CommandIntent.HELP:
+            msg = (
+                "You can say: Start vision, What is in front of me, Read this, Count these notes, "
+                "What color is this, Is there a bottle, Learn this as my bottle, Where was my keys, "
+                "Connect phone, or Stop camera."
+            )
+            return {"intent": intent.value, "spoken_response": msg}
+
         msg = (
-            "I did not understand that command. You can say: Start vision, What is in front of me, "
-            "Read this, Count these notes, Learn this as my bottle, or Where was my keys."
+            "I did not understand that command. Say Help to hear everything I can do, or try: "
+            "What is in front of me, Count these notes, or Where was my keys."
         )
         return {"intent": CommandIntent.UNKNOWN.value, "spoken_response": msg}
 

@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from packages.vision.contracts import BoundingBox, Detection
+from packages.vision.spatial import narrate_scene
+from services.core.config import Settings
+from services.core.main import create_app
+
+
+def test_spatial_narration_describes_held_object_relation() -> None:
+    person = Detection("person", BoundingBox(0.2, 0.2, 0.8, 0.95), 0.85, "v2")
+    note = Detection("Rs 100 banknote", BoundingBox(0.35, 0.45, 0.65, 0.70), 0.92, "v2")
+    text = narrate_scene([person, note])
+    assert "person" in text.lower()
+    assert "rs 100 banknote" in text.lower()
+    assert "held or in front of the person" in text.lower()
+
+
+def test_conversational_presence_color_and_help_commands(tmp_path: Path) -> None:
+    app = create_app(Settings(data_dir=tmp_path))
+    client = TestClient(app)
+
+    client.post("/api/v1/cameras/start", json={"source_id": "mock-cam-0"})
+
+    r_help = client.post("/api/v1/commands", json={"text": "Help"})
+    assert r_help.status_code == 200
+    assert "what is in front of me" in r_help.json()["spoken_response"].lower()
+
+    r_color = client.post("/api/v1/commands", json={"text": "What color is this?"})
+    assert r_color.status_code == 200
+    assert "color" in r_color.json()
+
+    r_pres = client.post("/api/v1/commands", json={"text": "Is there a laptop?"})
+    assert r_pres.status_code == 200
+    assert r_pres.json()["present"] is False
+
+    r_known = client.post("/api/v1/commands", json={"text": "What objects do you know?"})
+    assert r_known.status_code == 200
+    assert "learned objects" in r_known.json()["spoken_response"].lower() or "not taught" in r_known.json()["spoken_response"].lower()
