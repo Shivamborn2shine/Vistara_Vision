@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  API_BASE,
   api,
+  getApiBase,
+  setApiBase,
   type CameraInfo,
   type DiagnosticsPayload,
   type LearnedObject,
@@ -50,6 +51,7 @@ export function App() {
   const [showPreview, setShowPreview] = useState<boolean>(false);
   const [previewTick, setPreviewTick] = useState<number>(0);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
+  const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
 
   const speak = useCallback(
     (text: string) => {
@@ -345,7 +347,7 @@ export function App() {
           {showPreview && cameraStatus === "active" && (
             <img
               className="preview-img"
-              src={`${API_BASE}/api/v1/cameras/preview?t=${previewTick}`}
+              src={`${getApiBase()}/api/v1/cameras/preview?t=${previewTick}`}
               alt="Live camera preview"
             />
           )}
@@ -514,6 +516,32 @@ export function App() {
             </span>
           )}
         </div>
+        <form
+          className="btn-row"
+          style={{ alignItems: "center", marginTop: "0.5rem" }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            const saved = setApiBase(backendUrlInput);
+            setBackendUrlInput(saved);
+            speak(`Backend URL set to ${saved || "same origin"}. Reconnecting.`);
+            void refreshLists();
+          }}
+        >
+          <label htmlFor="backend-url-input" className="muted">
+            Backend URL:
+          </label>
+          <input
+            id="backend-url-input"
+            type="text"
+            value={backendUrlInput}
+            onChange={(e) => setBackendUrlInput(e.target.value)}
+            placeholder="http://127.0.0.1:8765"
+            style={{ minWidth: "240px" }}
+          />
+          <button type="submit" className="btn">
+            Save &amp; Reconnect
+          </button>
+        </form>
       </footer>
     </div>
   );

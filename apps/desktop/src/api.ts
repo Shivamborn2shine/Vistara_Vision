@@ -47,11 +47,46 @@ export interface DiagnosticsPayload {
   learned_objects_count: number;
 }
 
-export const API_BASE =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+const STORAGE_KEY = "vistara_api_base";
+
+export function getApiBase(): string {
+  if (typeof window !== "undefined") {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = params.get("api");
+    if (fromQuery) {
+      const cleaned = fromQuery.replace(/\/$/, "");
+      window.localStorage.setItem(STORAGE_KEY, cleaned);
+      return cleaned;
+    }
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    if (saved !== null && saved !== "") {
+      return saved.replace(/\/$/, "");
+    }
+  }
+  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "");
+  if (envBase) return envBase;
+
+  if (typeof window !== "undefined" && window.location.hostname.endsWith("vercel.app")) {
+    return "http://127.0.0.1:8765";
+  }
+  return "";
+}
+
+export function setApiBase(url: string): string {
+  const cleaned = url.trim().replace(/\/$/, "");
+  if (typeof window !== "undefined") {
+    if (cleaned) {
+      window.localStorage.setItem(STORAGE_KEY, cleaned);
+    } else {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  }
+  return cleaned;
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const base = getApiBase();
+  const res = await fetch(`${base}${url}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init
   });
