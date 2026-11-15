@@ -67,6 +67,10 @@ class PairingConnectRequest(BaseModel):
     consent_granted: bool
 
 
+class PublicUrlRequest(BaseModel):
+    public_url: str | None = None
+
+
 class AppContainer:
     """Holds modular services for the Vistara Vision local monolith."""
 
@@ -88,6 +92,7 @@ class AppContainer:
         self.pairing = PhonePairingManager(ttl_seconds=settings.pairing_ttl_seconds)
         self.active_session_id: str | None = None
         self.last_spoken_response: str = "Vistara Vision is ready."
+        self.public_url: str | None = settings.public_url
         self.start_time = time.monotonic()
 
 
@@ -654,12 +659,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- Phone Pairing & Remote Camera Stream (FR02, FR03) ---
 
+    @app.post("/api/v1/pairing/public-url")
+    def set_public_url(req: PublicUrlRequest, request: Request) -> dict[str, Any]:
+        # Only allow local launcher on loopback to set the tunnel public URL
+        client_host = request.client.host if request.client else ""
+        if client_host not in ("127.0.0.1", "::1", "testclient"):
+            raise HTTPException(status_code=403, detail="Only local launcher may set public_url.")
+        c.public_url = req.public_url.rstrip("/") if req.public_url else None
+        return {"public_url": c.public_url}
+
     @app.post("/api/v1/pairing/create")
     def create_pairing(request: Request) -> dict[str, Any]:
-        base_url = str(request.base_url).rstrip("/")
-        if "127.0.0.1" in base_url or "localhost" in base_url:
-            lan_ip = _get_lan_ip()
-            base_url = base_url.replace("127.0.0.1", lan_ip).replace("localhost", lan_ip)
+        if c.public_url:
+            base_url = c.public_url.rstrip("/")
+        else:
+            base_url = str(request.base_url).rstrip("/")
+            if "127.0.0.1" in base_url or "localhost" in base_url:
+                lan_ip = _get_lan_ip()
+                base_url = base_url.replace("127.0.0.1", lan_ip).replace("localhost", lan_ip)
         sess, join_url, qr_data_uri = c.pairing.create_pairing(base_url=base_url)
         msg = f"Phone pairing ready. Scan the QR code or open the link with code {sess.short_code}."
         c.last_spoken_response = msg

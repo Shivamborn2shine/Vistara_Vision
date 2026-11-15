@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     cloud_vision_enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 8765
+    public_url: str | None = None
 
     @property
     def db_path(self) -> Path:

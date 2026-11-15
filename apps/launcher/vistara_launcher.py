@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,7 +17,9 @@ from tkinter import scrolledtext
 
 VERCEL_URL = "https://vistara-vision.vercel.app/?api=http://127.0.0.1:8765"
 LOCAL_HEALTH_URL = "http://127.0.0.1:8765/api/v1/health"
+PUBLIC_URL_ENDPOINT = "http://127.0.0.1:8765/api/v1/pairing/public-url"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TRYCLOUDFLARE_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 
 
 def find_python_executable() -> str:
@@ -22,6 +27,13 @@ def find_python_executable() -> str:
     if venv_python.exists():
         return str(venv_python)
     return sys.executable
+
+
+def find_cloudflared_executable() -> str | None:
+    venv_cf = REPO_ROOT / ".venv" / "Scripts" / "cloudflared.exe"
+    if venv_cf.exists():
+        return str(venv_cf)
+    return shutil.which("cloudflared")
 
 
 class VistaraLauncherApp:
@@ -32,6 +44,8 @@ class VistaraLauncherApp:
         self.root.configure(bg="#0b1120")
 
         self.process: subprocess.Popen[str] | None = None
+        self.tunnel_process: subprocess.Popen[str] | None = None
+        self.tunnel_url: str | None = None
         self._stopping = False
 
         header = tk.Label(
@@ -135,7 +149,8 @@ class VistaraLauncherApp:
     def start_and_launch(self) -> None:
         if self._is_backend_healthy():
             self.status_var.set("Status: Backend Running (127.0.0.1:8765)")
-            self.log("Backend is already healthy. Opening Vistara Vision in browser...")
+            self.log("Backend is already healthy. Ensuring Cloudflare tunnel & opening browser...")
+            self._start_cloudflared()
             webbrowser.open(VERCEL_URL)
             return
 
@@ -168,6 +183,56 @@ class VistaraLauncherApp:
 
         threading.Thread(target=self._stream_logs, daemon=True).start()
         threading.Thread(target=self._wait_and_open_browser, daemon=True).start()
+        self._start_cloudflared()
+
+    def _start_cloudflared(self) -> None:
+        if self.tunnel_process is not None and self.tunnel_process.poll() is None:
+            return
+        cf_exe = find_cloudflared_executable()
+        if not cf_exe:
+            self.log("cloudflared not found; phone pairing will use local Wi-Fi IP.")
+            return
+        creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.log("Starting Cloudflare Tunnel for internet phone pairing...")
+        self.tunnel_process = subprocess.Popen(
+            [cf_exe, "tunnel", "--url", "http://127.0.0.1:8765"],
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=creation_flags,
+        )
+        threading.Thread(target=self._stream_tunnel_logs, daemon=True).start()
+
+    def _stream_tunnel_logs(self) -> None:
+        if self.tunnel_process is None or self.tunnel_process.stdout is None:
+            return
+        for line in self.tunnel_process.stdout:
+            m = TRYCLOUDFLARE_RE.search(line)
+            if m and not self.tunnel_url:
+                self.tunnel_url = m.group(0)
+                self.log(f"Cloudflare Tunnel Ready: {self.tunnel_url}")
+                self._push_public_url(self.tunnel_url)
+            elif "ERR" in line or "Registered tunnel" in line:
+                self.log(f"[tunnel] {line.strip()}")
+
+    def _push_public_url(self, url: str | None) -> None:
+        for _ in range(15):
+            if self._is_backend_healthy():
+                break
+            time.sleep(0.5)
+        try:
+            body = json.dumps({"public_url": url}).encode("utf-8")
+            req = urllib.request.Request(
+                PUBLIC_URL_ENDPOINT,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2.0):
+                pass
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            self.log(f"Could not register tunnel URL with backend: {exc}")
 
     def _stream_logs(self) -> None:
         if self.process is None or self.process.stdout is None:
@@ -192,6 +257,11 @@ class VistaraLauncherApp:
         self.log("Timed out waiting for backend health check on port 8765.")
 
     def stop_backend(self) -> None:
+        if self.tunnel_process is not None and self.tunnel_process.poll() is None:
+            self.tunnel_process.terminate()
+            self.log("Stopped Cloudflare Tunnel.")
+        self.tunnel_process = None
+        self.tunnel_url = None
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             self.log("Stopped local Vistara backend.")
