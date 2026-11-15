@@ -47,16 +47,31 @@ export interface DiagnosticsPayload {
   learned_objects_count: number;
 }
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+export const API_BASE =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init
   });
-  const data = await res.json();
+  const raw = await res.text();
+  let data: unknown = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        `Vistara backend API is unreachable (HTTP ${res.status}). Start the local Python service on port 8765 or configure VITE_API_BASE_URL.`
+      );
+    }
+  }
   if (!res.ok) {
-    throw new Error(data.detail || "Request failed");
+    const detail =
+      data && typeof data === "object" && "detail" in data
+        ? String((data as { detail: unknown }).detail)
+        : `Request failed (HTTP ${res.status})`;
+    throw new Error(detail);
   }
   return data as T;
 }

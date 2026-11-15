@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  API_BASE,
   api,
   type CameraInfo,
   type DiagnosticsPayload,
@@ -344,7 +345,7 @@ export function App() {
           {showPreview && cameraStatus === "active" && (
             <img
               className="preview-img"
-              src={`/api/v1/cameras/preview?t=${previewTick}`}
+              src={`${API_BASE}/api/v1/cameras/preview?t=${previewTick}`}
               alt="Live camera preview"
             />
           )}
