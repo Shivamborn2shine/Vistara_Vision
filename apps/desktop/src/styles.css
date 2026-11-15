@@ -38,6 +38,20 @@ body {
   padding: 1.25rem;
 }
 
+.hero-layout {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 1.25rem;
+  align-items: start;
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .hero-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 .top-bar {
   display: flex;
   flex-wrap: wrap;

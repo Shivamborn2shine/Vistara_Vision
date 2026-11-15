@@ -57,9 +57,15 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const continuousMicRef = useRef<boolean>(false);
+  const isSpeakingRef = useRef<boolean>(false);
   const browserStreamRef = useRef<MediaStream | null>(null);
   const browserTimerRef = useRef<number | null>(null);
   const hiddenVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    continuousMicRef.current = continuousMic;
+  }, [continuousMic]);
 
   const speak = useCallback(
     (text: string) => {
@@ -67,9 +73,24 @@ export function App() {
       if (!autoSpeak || typeof window === "undefined" || !("speechSynthesis" in window)) {
         return;
       }
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+        setListening(false);
+      }
       window.speechSynthesis.cancel();
       const utter = new SpeechSynthesisUtterance(text);
       utter.rate = speechRate;
+      isSpeakingRef.current = true;
+      utter.onend = () => {
+        isSpeakingRef.current = false;
+        if (continuousMicRef.current && !recognitionRef.current) {
+          window.setTimeout(() => startVoiceRecognition(), 350);
+        }
+      };
+      utter.onerror = () => {
+        isSpeakingRef.current = false;
+      };
       window.speechSynthesis.speak(utter);
     },
     [autoSpeak, speechRate]
@@ -323,6 +344,9 @@ export function App() {
       setListening(false);
       return;
     }
+    if (isSpeakingRef.current) {
+      return;
+    }
     const rec = new SR();
     rec.lang = "en-IN";
     rec.interimResults = false;
@@ -331,6 +355,9 @@ export function App() {
     setListening(true);
 
     rec.onresult = (ev) => {
+      if (isSpeakingRef.current || window.speechSynthesis?.speaking) {
+        return;
+      }
       const transcript = ev.results[0]?.[0]?.transcript ?? "";
       if (transcript.trim()) {
         setLastHeard(transcript);
@@ -349,14 +376,16 @@ export function App() {
     rec.onend = () => {
       setListening(false);
       recognitionRef.current = null;
-      if (continuousMic) {
+      if (continuousMicRef.current && !isSpeakingRef.current) {
         window.setTimeout(() => {
-          startVoiceRecognition();
-        }, 400);
+          if (continuousMicRef.current && !isSpeakingRef.current && !recognitionRef.current) {
+            startVoiceRecognition();
+          }
+        }, 500);
       }
     };
     rec.start();
-  }, [continuousMic, handleCommandSubmit, speak]);
+  }, [handleCommandSubmit, speak]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -412,103 +441,79 @@ export function App() {
         </div>
       </header>
 
-      <section className="announcement-banner" aria-live="assertive" aria-atomic="true">
-        <p className="announcement-text">{announcement}</p>
-        <button type="button" className="btn" onClick={() => speak(announcement)}>
-          Repeat
-        </button>
-      </section>
+      <div className="hero-layout">
+        <div>
+          <section className="announcement-banner" aria-live="assertive" aria-atomic="true">
+            <p className="announcement-text">{announcement}</p>
+            <button type="button" className="btn" onClick={() => speak(announcement)}>
+              Repeat
+            </button>
+          </section>
 
-      <form
-        className="command-bar"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void handleCommandSubmit(commandText);
-        }}
-      >
-        <label htmlFor="voice-cmd-input" className="muted" style={{ alignSelf: "center" }}>
-          Command:
-        </label>
-        <input
-          id="voice-cmd-input"
-          type="text"
-          value={commandText}
-          onChange={(e) => setCommandText(e.target.value)}
-          placeholder='Try: "What is in front of me?", "Count these notes", "Where was my bottle?"'
-        />
-        <button type="submit" className="btn btn-primary">
-          Run Command
-        </button>
-        <button
-          type="button"
-          className={`btn ${listening ? "btn-mic-active" : ""}`}
-          onClick={startVoiceRecognition}
-          title="Shortcut: Alt+M"
-        >
-          {listening ? "Listening... (Click to Stop)" : "Speak (Alt+M)"}
-        </button>
-        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-          <input
-            type="checkbox"
-            checked={continuousMic}
-            onChange={(e) => {
-              const checked = e.target.checked;
-              setContinuousMic(checked);
-              if (checked && !listening) {
-                startVoiceRecognition();
-              }
+          <form
+            className="command-bar"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleCommandSubmit(commandText);
             }}
-          />
-          Hands-free
-        </label>
-      </form>
-      {lastHeard && (
-        <p className="muted" style={{ marginTop: "-0.75rem", marginBottom: "1rem" }}>
-          Last heard: <strong>&ldquo;{lastHeard}&rdquo;</strong>
-        </p>
-      )}
-
-      <main className="grid-4">
-        {/* 1. Start Vision */}
-        <section className="card" aria-labelledby="h-vision">
-          <h2 id="h-vision">1. Start Vision</h2>
-          <label htmlFor="camera-select" className="muted">
-            Select camera source
-          </label>
-          <select
-            id="camera-select"
-            value={selectedCamera}
-            onChange={(e) => setSelectedCamera(e.target.value)}
           >
-            {cameras.map((cam) => (
-              <option key={cam.source_id} value={cam.source_id}>
-                {cam.name} {cam.available ? "" : "(Unavailable)"}
-              </option>
-            ))}
-          </select>
-          <div className="btn-row">
-            <button type="button" className="btn btn-primary" onClick={handleStartCamera}>
-              Start Vision
-            </button>
-            <button type="button" className="btn" onClick={handleDescribe}>
-              What Do You See?
-            </button>
-            <button type="button" className="btn" onClick={handleReadText}>
-              Read Text
-            </button>
-            <button type="button" className="btn" onClick={handleCurrency}>
-              Identify Currency
-            </button>
-          </div>
-          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <label htmlFor="voice-cmd-input" className="muted" style={{ alignSelf: "center" }}>
+              Command:
+            </label>
             <input
-              type="checkbox"
-              checked={showPreview}
-              onChange={(e) => setShowPreview(e.target.checked)}
+              id="voice-cmd-input"
+              type="text"
+              value={commandText}
+              onChange={(e) => setCommandText(e.target.value)}
+              placeholder='Try: "What is in front of me?", "Count these notes", "Where was my bottle?"'
             />
-            Show visual preview (for sighted helper)
-          </label>
-          {showPreview && cameraStatus === "active" && (
+            <button type="submit" className="btn btn-primary">
+              Run Command
+            </button>
+            <button
+              type="button"
+              className={`btn ${listening ? "btn-mic-active" : ""}`}
+              onClick={startVoiceRecognition}
+              title="Shortcut: Alt+M"
+            >
+              {listening ? "Listening... (Click to Stop)" : "Speak (Alt+M)"}
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+              <input
+                type="checkbox"
+                checked={continuousMic}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setContinuousMic(checked);
+                  continuousMicRef.current = checked;
+                  if (checked && !listening) {
+                    startVoiceRecognition();
+                  }
+                }}
+              />
+              Hands-free
+            </label>
+          </form>
+          {lastHeard && (
+            <p className="muted" style={{ marginTop: "-0.5rem", marginBottom: "0.5rem" }}>
+              Last heard: <strong>&ldquo;{lastHeard}&rdquo;</strong>
+            </p>
+          )}
+        </div>
+
+        <aside className="card" aria-label="Top-right live camera preview">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Live Preview</h2>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem" }}>
+              <input
+                type="checkbox"
+                checked={showPreview}
+                onChange={(e) => setShowPreview(e.target.checked)}
+              />
+              Show
+            </label>
+          </div>
+          {showPreview && cameraStatus === "active" ? (
             <div className="preview-container">
               <img
                 className="preview-img"
@@ -547,7 +552,58 @@ export function App() {
                 })}
               </svg>
             </div>
+          ) : (
+            <div
+              className="preview-container"
+              style={{
+                height: "180px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "1rem",
+                textAlign: "center"
+              }}
+            >
+              <span className="muted">
+                {cameraStatus === "active" ? "Preview hidden." : "Start Vision to see live camera feed."}
+              </span>
+            </div>
           )}
+        </aside>
+      </div>
+
+      <main className="grid-4">
+        {/* 1. Start Vision */}
+        <section className="card" aria-labelledby="h-vision">
+          <h2 id="h-vision">1. Start Vision</h2>
+          <label htmlFor="camera-select" className="muted">
+            Select camera source
+          </label>
+          <select
+            id="camera-select"
+            value={selectedCamera}
+            onChange={(e) => setSelectedCamera(e.target.value)}
+          >
+            {cameras.map((cam) => (
+              <option key={cam.source_id} value={cam.source_id}>
+                {cam.name} {cam.available ? "" : "(Unavailable)"}
+              </option>
+            ))}
+          </select>
+          <div className="btn-row">
+            <button type="button" className="btn btn-primary" onClick={handleStartCamera}>
+              Start Vision
+            </button>
+            <button type="button" className="btn" onClick={handleDescribe}>
+              What Do You See?
+            </button>
+            <button type="button" className="btn" onClick={handleReadText}>
+              Read Text
+            </button>
+            <button type="button" className="btn" onClick={handleCurrency}>
+              Identify Currency
+            </button>
+          </div>
         </section>
 
         {/* 2. Connect Phone Camera */}

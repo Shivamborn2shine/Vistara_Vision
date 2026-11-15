@@ -89,10 +89,18 @@ class HeuristicObjectDetector:
     @staticmethod
     def _classify_salient_region(mean_rgb: Any, width: float, height: float) -> str:
         r, g, b = float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])
-        if b > r + 0.15 and b > g + 0.05 and height > width:
-            return "blue bottle"
-        if r > 0.7 and g > 0.7 and b > 0.65 and width >= height:
-            return "notebook"
-        if width > 0.6 and height < 0.35:
-            return "table"
-        return "nearby object"
+        luma = 0.299 * r + 0.587 * g + 0.114 * b
+
+        if b > r + 0.12 and b > g + 0.04:
+            return "blue bottle" if height > width else "blue object"
+        if r > 0.68 and g > 0.68 and b > 0.65:
+            return "bright paper or screen" if width >= height else "white object"
+        if r > g + 0.14 and r > b + 0.14:
+            return "reddish object"
+        if g > r + 0.10 and g > b + 0.10:
+            return "greenish object"
+        if width > 0.62 and height < 0.35:
+            return "tabletop or surface"
+        if luma < 0.25:
+            return "dark object"
+        return "foreground object"
