@@ -65,7 +65,7 @@ export function App() {
   const [detections, setDetections] = useState<DetectionItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
   const [geminiConfigured, setGeminiConfigured] = useState<boolean>(false);
-  const [geminiModel, setGeminiModel] = useState<string>("gemini-2.5-flash");
+  const [geminiModel, setGeminiModel] = useState<string>("gemini-3.8-flash");
   const [geminiKeyInput, setGeminiKeyInput] = useState<string>("");
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -1205,8 +1205,9 @@ export function App() {
             value={geminiModel}
             onChange={(e) => setGeminiModel(e.target.value)}
           >
-            <option value="gemini-2.5-flash">gemini-2.5-flash (Fast)</option>
-            <option value="gemini-2.5-pro">gemini-2.5-pro (Smartest)</option>
+            <option value="gemini-3.8-flash">gemini-3.8-flash (Fast &amp; Latest)</option>
+            <option value="gemini-flash-latest">gemini-flash-latest (Auto Flash)</option>
+            <option value="gemini-pro-latest">gemini-pro-latest (Smartest Pro)</option>
           </select>
           <button type="submit" className="btn btn-primary">
             Save Gemini Key

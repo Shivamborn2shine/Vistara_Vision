@@ -11,9 +11,6 @@ import httpx
 from packages.vision.contracts import CameraFrame
 
 _GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-_VERTEX_EXPRESS_ENDPOINT = (
-    "https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
-)
 
 _SYSTEM_PROMPT = (
     "You are Vistara Vision, a voice-first assistive AI for a blind or low-vision user. "
@@ -40,12 +37,12 @@ class GeminiVisionAssistant:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.8-flash",
         config_path: Path | None = None,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 25.0,
     ) -> None:
         self._api_key = (api_key or "").strip() or None
-        self._model = model.strip() or "gemini-2.5-flash"
+        self._model = model.strip() or "gemini-3.8-flash"
         self._config_path = config_path
         self._timeout = timeout_seconds
         self._load_persisted_config()
@@ -133,13 +130,14 @@ class GeminiVisionAssistant:
             },
         }
 
-        endpoint = (
-            _VERTEX_EXPRESS_ENDPOINT if self._api_key.startswith("AQ.") else _GEMINI_ENDPOINT
-        )
-        url = endpoint.format(model=self._model)
+        url = _GEMINI_ENDPOINT.format(model=self._model)
         try:
             with httpx.Client(timeout=self._timeout) as client:
-                resp = client.post(url, params={"key": self._api_key}, json=payload)
+                resp = client.post(
+                    url,
+                    headers={"x-goog-api-key": self._api_key},
+                    json=payload,
+                )
         except httpx.TimeoutException:
             return GeminiVisionReply(
                 text="Gemini Vision timed out. Please try asking again.",
@@ -168,6 +166,13 @@ class GeminiVisionAssistant:
                 model=self._model,
                 ok=False,
                 error_reason="rate_limited",
+            )
+        if resp.status_code == 503:
+            return GeminiVisionReply(
+                text="Gemini is temporarily busy due to high demand. Please try again in a moment.",
+                model=self._model,
+                ok=False,
+                error_reason="service_unavailable",
             )
         if resp.status_code >= 400:
             return GeminiVisionReply(

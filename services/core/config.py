@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     pairing_ttl_seconds: int = 180
     cloud_vision_enabled: bool = False
     gemini_api_key: str | None = os.environ.get("GEMINI_API_KEY") or None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     host: str = "127.0.0.1"
     port: int = 8765
     public_url: str | None = None
