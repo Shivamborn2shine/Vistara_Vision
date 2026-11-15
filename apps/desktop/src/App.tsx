@@ -57,6 +57,9 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBase());
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const browserStreamRef = useRef<MediaStream | null>(null);
+  const browserTimerRef = useRef<number | null>(null);
+  const hiddenVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const speak = useCallback(
     (text: string) => {
@@ -125,18 +128,99 @@ export function App() {
     return () => window.clearInterval(id);
   }, [pairing, refreshLists, speak]);
 
+  const stopBrowserStream = useCallback(() => {
+    if (browserTimerRef.current !== null) {
+      window.clearInterval(browserTimerRef.current);
+      browserTimerRef.current = null;
+    }
+    if (browserStreamRef.current) {
+      browserStreamRef.current.getTracks().forEach((t) => t.stop());
+      browserStreamRef.current = null;
+    }
+  }, []);
+
+  const startBrowserWebcam = useCallback(async (): Promise<boolean> => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      return false;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      browserStreamRef.current = stream;
+      const video = hiddenVideoRef.current ?? document.createElement("video");
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+      hiddenVideoRef.current = video;
+
+      const res = await api.startCamera("browser-cam-0");
+      setSelectedCamera("browser-cam-0");
+      setCameraStatus(res.status);
+
+      const canvas = document.createElement("canvas");
+      browserTimerRef.current = window.setInterval(() => {
+        if (!video.videoWidth || !video.videoHeight) return;
+        canvas.width = 640;
+        canvas.height = Math.round((video.videoHeight / video.videoWidth) * 640) || 480;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          (blob) => {
+            if (blob) void api.pushBrowserFrame(blob);
+          },
+          "image/jpeg",
+          0.78
+        );
+      }, 500);
+
+      speak("Browser webcam started.");
+      await refreshLists();
+      return true;
+    } catch {
+      stopBrowserStream();
+      return false;
+    }
+  }, [refreshLists, speak, stopBrowserStream]);
+
   const handleStartCamera = async () => {
+    stopBrowserStream();
+    if (selectedCamera === "browser-cam-0") {
+      const ok = await startBrowserWebcam();
+      if (!ok) {
+        const mockRes = await api.startCamera("mock-cam-0");
+        setSelectedCamera("mock-cam-0");
+        setCameraStatus(mockRes.status);
+        speak("Browser camera was unavailable, so I started the Demo Scene Camera.");
+        await refreshLists();
+      }
+      return;
+    }
+
     try {
       const res = await api.startCamera(selectedCamera);
       setCameraStatus(res.status);
       speak(res.spoken_response);
       await refreshLists();
-    } catch (err) {
-      speak(err instanceof Error ? err.message : "Failed to start camera.");
+    } catch {
+      if (selectedCamera === "webcam-0") {
+        const browserOk = await startBrowserWebcam();
+        if (browserOk) return;
+        const mockRes = await api.startCamera("mock-cam-0");
+        setSelectedCamera("mock-cam-0");
+        setCameraStatus(mockRes.status);
+        speak(
+          "No physical webcam was accessible on this PC, so I started the Demo Scene Camera."
+        );
+        await refreshLists();
+        return;
+      }
+      speak("Failed to start the selected camera.");
     }
   };
 
   const handleStopCamera = async () => {
+    stopBrowserStream();
     try {
       const res = await api.stopCamera();
       setCameraStatus(res.status);

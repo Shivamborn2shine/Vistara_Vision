@@ -132,6 +132,14 @@ export const api = {
       "/api/v1/cameras/stop",
       { method: "POST" }
     ),
+  pushBrowserFrame: async (blob: Blob) => {
+    const form = new FormData();
+    form.append("file", blob, "frame.jpg");
+    await fetch(`${getApiBase()}/api/v1/cameras/browser/frame`, {
+      method: "POST",
+      body: form
+    });
+  },
   describeScene: () =>
     request<{ spoken_response: string; detections: DetectionItem[] }>("/api/v1/vision/describe", {
       method: "POST"

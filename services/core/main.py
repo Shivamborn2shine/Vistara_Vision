@@ -273,6 +273,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="No active camera frame.")
         return Response(content=frame.jpeg_bytes, media_type="image/jpeg")
 
+    @app.post("/api/v1/cameras/browser/frame")
+    async def browser_push_frame(file: Annotated[UploadFile, File(...)]) -> dict[str, Any]:
+        src = c.camera_manager.get_source("browser-cam-0")
+        if not isinstance(src, PhoneStreamCameraSource):
+            raise HTTPException(status_code=404, detail="Browser camera source not registered.")
+        if src.status() != CameraStatus.ACTIVE:
+            c.camera_manager.start_camera("browser-cam-0")
+        data = await file.read()
+        src.push_frame(data)
+        return {"received": True, "bytes": len(data)}
+
     # --- Vision Actions (FR04, FR05, FR06, FR07) ---
 
     def _require_frame() -> Any:

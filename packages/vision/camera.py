@@ -92,10 +92,28 @@ class WebcamCameraSource:
                 self._status = CameraStatus.ERROR
                 return self._status
 
-            cap = cv2.VideoCapture(self.device_index)
-            if not cap or not cap.isOpened():
-                if cap:
-                    cap.release()
+            backends = [
+                getattr(cv2, "CAP_MSMF", None),
+                getattr(cv2, "CAP_DSHOW", None),
+                None,
+            ]
+            cap: Any = None
+            for backend in backends:
+                try:
+                    candidate = (
+                        cv2.VideoCapture(self.device_index, backend)
+                        if backend is not None
+                        else cv2.VideoCapture(self.device_index)
+                    )
+                    if candidate and candidate.isOpened():
+                        cap = candidate
+                        break
+                    if candidate:
+                        candidate.release()
+                except Exception:
+                    continue
+
+            if cap is None:
                 self._status = CameraStatus.PERMISSION_DENIED
                 return self._status
 
@@ -210,6 +228,18 @@ class CameraManager:
                 source_id="mock-cam-0",
                 name="Demo Scene Camera (Built-in)",
                 source_type="mock",
+                available=True,
+            ),
+        )
+        self.register_source(
+            PhoneStreamCameraSource(
+                source_id="browser-cam-0",
+                name="Browser Webcam (Chrome/Edge)",
+            ),
+            CameraInfo(
+                source_id="browser-cam-0",
+                name="Browser Webcam (Chrome/Edge)",
+                source_type="browser_webcam",
                 available=True,
             ),
         )
