@@ -39,7 +39,9 @@ def parse_voice_command(text: str) -> ParsedCommand:
     low = re.sub(r"[?.!,]+$", "", low).strip()
 
     if not low:
-        if any(k in low for k in ("what color", "what colour", "which color", "which colour")):
+        return ParsedCommand(intent=CommandIntent.UNKNOWN, raw_text=raw)
+
+    if any(k in low for k in ("what color", "what colour", "which color", "which colour")):
         return ParsedCommand(intent=CommandIntent.DESCRIBE_COLOR, raw_text=raw)
 
     if any(
