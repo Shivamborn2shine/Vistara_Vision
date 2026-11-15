@@ -46,7 +46,7 @@ export function App() {
   const [listening, setListening] = useState<boolean>(false);
   const [holdingToSpeak, setHoldingToSpeak] = useState<boolean>(false);
   const [micLevel, setMicLevel] = useState<number>(0);
-  const [voiceStatus, setVoiceStatus] = useState<string>("Ready — hold Alt+Space or Hold to Speak");
+  const [voiceStatus, setVoiceStatus] = useState<string>("Ready — press N or click Speak (N)");
   const [liveTranscript, setLiveTranscript] = useState<string>("");
   const [continuousMic, setContinuousMic] = useState<boolean>(false);
   const [lastHeard, setLastHeard] = useState<string>("");
@@ -574,7 +574,7 @@ export function App() {
     rec.maxAlternatives = 1;
     recognitionRef.current = rec;
     setListening(true);
-    setVoiceStatus("Listening... Speak now (release Alt+Space or button to send)");
+    setVoiceStatus("Listening... Speak now (press N or click to stop & send)");
 
     let sessionCommitted = pttTranscriptRef.current;
 
@@ -680,31 +680,38 @@ export function App() {
     }
   }, [flushPttCommand, playMicTone, stopMicMeter]);
 
-  useEffect(() => {
-    if (!holdingToSpeak) return;
-    const onRelease = () => {
+  const toggleVoiceCapture = useCallback(() => {
+    if (pttActiveRef.current) {
       stopHoldToSpeak();
-    };
-    window.addEventListener("pointerup", onRelease);
-    window.addEventListener("pointercancel", onRelease);
-    window.addEventListener("blur", onRelease);
-    return () => {
-      window.removeEventListener("pointerup", onRelease);
-      window.removeEventListener("pointercancel", onRelease);
-      window.removeEventListener("blur", onRelease);
-    };
-  }, [holdingToSpeak, stopHoldToSpeak]);
+    } else {
+      startHoldToSpeak();
+    }
+  }, [startHoldToSpeak, stopHoldToSpeak]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.altKey && (e.code === "Space" || e.key === " ")) {
+      const target = e.target as HTMLElement | null;
+      const isTypingField =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        Boolean(target?.isContentEditable);
+
+      if (
+        !isTypingField &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "n"
+      ) {
         e.preventDefault();
         e.stopPropagation();
         if (!e.repeat) {
-          startHoldToSpeak();
+          toggleVoiceCapture();
         }
         return;
       }
+
       if (!e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === "m") {
@@ -715,20 +722,11 @@ export function App() {
         void handleDescribe();
       }
     };
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (pttActiveRef.current && (e.code === "Space" || e.key === " " || e.key === "Alt")) {
-        e.preventDefault();
-        e.stopPropagation();
-        stopHoldToSpeak();
-      }
-    };
     window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("keyup", onKeyUp, true);
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("keyup", onKeyUp, true);
     };
-  }, [handleDescribe, startHoldToSpeak, startVoiceRecognition, stopHoldToSpeak]);
+  }, [handleDescribe, startVoiceRecognition, toggleVoiceCapture]);
 
   const handleCreatePairing = async () => {
     try {
@@ -800,33 +798,12 @@ export function App() {
             <button
               type="button"
               className={`btn ${holdingToSpeak ? "btn-hold-mic-active" : "btn-hold-mic"}`}
-              onPointerDown={(e) => {
-                e.preventDefault();
-                startHoldToSpeak();
-              }}
-              onPointerUp={(e) => {
-                e.preventDefault();
-                stopHoldToSpeak();
-              }}
-              onPointerCancel={() => stopHoldToSpeak()}
-              onKeyDown={(e) => {
-                if ((e.key === " " || e.key === "Enter") && !e.repeat) {
-                  e.preventDefault();
-                  startHoldToSpeak();
-                }
-              }}
-              onKeyUp={(e) => {
-                if (e.key === " " || e.key === "Enter") {
-                  e.preventDefault();
-                  stopHoldToSpeak();
-                }
-              }}
-              onContextMenu={(e) => e.preventDefault()}
+              onClick={toggleVoiceCapture}
               aria-pressed={holdingToSpeak}
-              aria-label="Hold to speak voice command (Alt + Space)"
-              title="Hold Alt+Space or press and hold this button while speaking; release to send"
+              aria-label="Toggle voice command listening (Shortcut: N)"
+              title="Press N or click to start listening; press N or click again to stop and send"
             >
-              {holdingToSpeak ? "Listening... Release to Send" : "Hold to Speak (Alt+Space)"}
+              {holdingToSpeak ? "Listening... (Press N to Stop)" : "Speak (N)"}
             </button>
             <button
               type="button"
@@ -875,7 +852,7 @@ export function App() {
                 ? `“${liveTranscript}”`
                 : lastHeard
                   ? `Last heard: “${lastHeard}”`
-                  : "Waiting for speech while holding Alt+Space..."}
+                  : "Waiting for speech... Press N or click Speak (N) to start."}
             </div>
           </div>
         </div>
