@@ -401,7 +401,7 @@ class INRCurrencyAnalyzer:
                     score *= 0.55
             elif denom == 50:
                 # Cyan-blue: Green is strong alongside Blue, Red is low
-                if h_lo <= hue <= h_hi and sat >= prof["min_sat"] and rg >= rb * 0.90:
+                if h_lo <= hue <= 208.0 and sat >= prof["min_sat"] and rg >= rb * 0.96:
                     score = min(0.95, score + 0.18)
                 else:
                     score *= 0.55
