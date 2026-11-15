@@ -11,6 +11,9 @@ import httpx
 from packages.vision.contracts import CameraFrame
 
 _GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_VERTEX_EXPRESS_ENDPOINT = (
+    "https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+)
 
 _SYSTEM_PROMPT = (
     "You are Vistara Vision, a voice-first assistive AI for a blind or low-vision user. "
@@ -130,7 +133,10 @@ class GeminiVisionAssistant:
             },
         }
 
-        url = _GEMINI_ENDPOINT.format(model=self._model)
+        endpoint = (
+            _VERTEX_EXPRESS_ENDPOINT if self._api_key.startswith("AQ.") else _GEMINI_ENDPOINT
+        )
+        url = endpoint.format(model=self._model)
         try:
             with httpx.Client(timeout=self._timeout) as client:
                 resp = client.post(url, params={"key": self._api_key}, json=payload)
