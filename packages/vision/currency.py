@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import colorsys
 import io
+import re
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 from packages.vision.contracts import (
     BoundingBox,
@@ -16,16 +19,21 @@ from packages.vision.detector import assess_frame_lighting
 
 SUPPORTED_INR_DENOMINATIONS = (10, 20, 50, 100, 200, 500, 2000)
 
-# Approximate dominant RGB centroids (0..1) of modern Mahatma Gandhi (New) series INR notes
-_INR_COLOR_PROFILES: dict[int, tuple[float, float, float]] = {
-    10: (0.56, 0.42, 0.31),  # Chocolate brown
-    20: (0.64, 0.68, 0.34),  # Greenish-yellow
-    50: (0.35, 0.67, 0.72),  # Fluorescent blue
-    100: (0.55, 0.46, 0.65),  # Lavender
-    200: (0.83, 0.56, 0.24),  # Bright orange-yellow
-    500: (0.53, 0.55, 0.52),  # Stone grey
-    2000: (0.68, 0.36, 0.56),  # Magenta
+# Normalized RGB ratios (r/sum, g/sum, b/sum) and HSV hue ranges (0..360) for modern INR notes
+_INR_PROFILES: dict[int, dict[str, Any]] = {
+    10: {"rgb_ratio": (0.40, 0.32, 0.28), "hue": (10.0, 38.0), "min_sat": 0.14},
+    20: {"rgb_ratio": (0.37, 0.40, 0.23), "hue": (52.0, 90.0), "min_sat": 0.16},
+    50: {"rgb_ratio": (0.22, 0.38, 0.40), "hue": (170.0, 212.0), "min_sat": 0.18},
+    100: {"rgb_ratio": (0.34, 0.31, 0.35), "hue": (210.0, 325.0), "min_sat": 0.05},
+    200: {"rgb_ratio": (0.48, 0.34, 0.18), "hue": (20.0, 48.0), "min_sat": 0.28},
+    500: {"rgb_ratio": (0.34, 0.34, 0.32), "hue": (0.0, 360.0), "min_sat": 0.0},
+    2000: {"rgb_ratio": (0.41, 0.25, 0.34), "hue": (290.0, 350.0), "min_sat": 0.18},
 }
+
+_DENOM_RE = re.compile(r"(?:₹|rs\.?|inr)?\s*\b(10|20|50|100|200|500|2000)\b", re.IGNORECASE)
+_CURRENCY_CONTEXT_RE = re.compile(
+    r"(₹|reserve\s*bank|rbi|india|rupee|भारत|रुपये)", re.IGNORECASE
+)
 
 
 def _box_iou(a: BoundingBox, b: BoundingBox) -> float:
@@ -40,21 +48,43 @@ def _box_iou(a: BoundingBox, b: BoundingBox) -> float:
     return inter / union if union > 1e-8 else 0.0
 
 
+def _rgb_to_hsv_deg(r: float, g: float, b: float) -> tuple[float, float, float]:
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    return h * 360.0, s, v
+
+
 class INRCurrencyAnalyzer:
     """
-    Indian banknote denomination analyzer with multi-frame de-duplication,
-    quality/lighting checks, confidence abstention, and non-authentication safety.
+    Indian banknote denomination analyzer combining:
+    1. Multi-orientation Local OCR denomination + RBI/rupee text matching (RapidOCR)
+    2. Detector-guided & multi-window HSV + normalized-RGB banknote classification
+    3. Multi-frame de-duplication, lighting/confidence abstention, and non-authentication safety
     """
 
-    model_version = "inr-color-geom-v1"
+    model_version = "inr-ocr-hsv-v3"
 
-    def __init__(self, confidence_threshold: float = 0.72) -> None:
+    def __init__(self, confidence_threshold: float = 0.68) -> None:
         self.confidence_threshold = confidence_threshold
+        self._ocr: Any = None
+        self._ocr_checked = False
+
+    def _get_ocr(self) -> Any:
+        if self._ocr_checked:
+            return self._ocr
+        self._ocr_checked = True
+        try:
+            from rapidocr_onnxruntime import RapidOCR  # type: ignore[import-not-found]
+
+            self._ocr = RapidOCR()
+        except Exception:
+            self._ocr = None
+        return self._ocr
 
     def analyze(
         self,
         frames: Sequence[CameraFrame],
         injected_candidates: Sequence[CurrencyNoteCandidate] | None = None,
+        candidate_boxes: Sequence[BoundingBox] | None = None,
     ) -> CurrencyAnalysisResult:
         if not frames and not injected_candidates:
             return CurrencyAnalysisResult(
@@ -81,7 +111,9 @@ class INRCurrencyAnalyzer:
         raw_candidates: list[CurrencyNoteCandidate] = list(injected_candidates or [])
         if not raw_candidates and frames:
             for frame in frames:
-                raw_candidates.extend(self._analyze_single_frame(frame))
+                raw_candidates.extend(
+                    self._analyze_single_frame(frame, candidate_boxes=candidate_boxes)
+                )
 
         if not raw_candidates:
             return CurrencyAnalysisResult(
@@ -96,7 +128,6 @@ class INRCurrencyAnalyzer:
                 ),
             )
 
-        # De-duplicate across frames using track_id or spatial overlap (IoU > 0.45)
         deduped = self._deduplicate_candidates(raw_candidates)
         confident = [c for c in deduped if c.confidence >= self.confidence_threshold]
 
@@ -109,7 +140,7 @@ class INRCurrencyAnalyzer:
                 uncertainty_reason="low_confidence",
                 guidance=(
                     "I am not confident enough to read the denomination clearly. "
-                    "Please flatten the note, reduce glare, or show the other side."
+                    "Please hold the note slightly closer and flatter in good light."
                 ),
             )
 
@@ -132,40 +163,176 @@ class INRCurrencyAnalyzer:
             guidance=guidance,
         )
 
-    def _analyze_single_frame(self, frame: CameraFrame) -> list[CurrencyNoteCandidate]:
+    def _analyze_single_frame(
+        self,
+        frame: CameraFrame,
+        candidate_boxes: Sequence[BoundingBox] | None = None,
+    ) -> list[CurrencyNoteCandidate]:
         img = Image.open(io.BytesIO(frame.jpeg_bytes)).convert("RGB")
-        small = img.resize((64, 48), Image.Resampling.BILINEAR)
-        arr = np.asarray(small, dtype=np.float32) / 255.0
+        ocr_hits = self._detect_via_ocr(img, candidate_boxes)
+        if ocr_hits:
+            return ocr_hits
 
-        # Sample center region where a held banknote typically appears
-        center = arr[10:38, 12:52, :]
-        std_rgb = float(center.std())
-        if std_rgb < 0.03:
-            # Uniform blank/flat background, unlikely to be a textured banknote
+        # When no OCR hit is found, inspect detector-supplied tight boxes (or center fallback)
+        if candidate_boxes:
+            box_results: list[CurrencyNoteCandidate] = []
+            for idx, box in enumerate(candidate_boxes):
+                cand = self._classify_crop_hsv(img, box, track_id=f"det-{idx}", allow_grey_500=True)
+                if cand is not None:
+                    box_results.append(cand)
+            return box_results
+
+        # Fallback: pick single best match among center windows (never emit duplicate 500s on background)
+        windows = [
+            BoundingBox(0.20, 0.22, 0.80, 0.78),
+            BoundingBox(0.32, 0.55, 0.68, 0.90),
+        ]
+        best: CurrencyNoteCandidate | None = None
+        for box in windows:
+            cand = self._classify_crop_hsv(img, box, track_id="center-note", allow_grey_500=False)
+            if cand is not None and (best is None or cand.confidence > best.confidence):
+                best = cand
+        return [best] if best is not None else []
+
+    def _detect_via_ocr(
+        self,
+        img: Image.Image,
+        candidate_boxes: Sequence[BoundingBox] | None = None,
+    ) -> list[CurrencyNoteCandidate]:
+        ocr = self._get_ocr()
+        if ocr is None:
             return []
 
-        mean_rgb = center.mean(axis=(0, 1))
+        crops: list[tuple[Image.Image, BoundingBox]] = []
+        w, h = img.size
+        for box in candidate_boxes or []:
+            crop = img.crop((int(box.x1 * w), int(box.y1 * h), int(box.x2 * w), int(box.y2 * h)))
+            if crop.width > 24 and crop.height > 24:
+                crops.append((crop, box))
+        if not crops:
+            crops.append((img, BoundingBox(0.15, 0.15, 0.85, 0.85)))
+
+        found: list[CurrencyNoteCandidate] = []
+        for crop_img, box in crops:
+            enhanced = ImageEnhance.Contrast(crop_img).enhance(1.4)
+            for angle in (0, 90, 270):
+                rot = enhanced.rotate(angle, expand=True) if angle else enhanced
+                if rot.width < 900:
+                    rot = rot.resize((rot.width * 2, rot.height * 2), Image.Resampling.BILINEAR)
+                try:
+                    res, _ = ocr(np.asarray(rot))
+                except Exception:
+                    continue
+                if not res:
+                    continue
+                joined = " ".join(str(item[1]) for item in res)
+                has_context = bool(_CURRENCY_CONTEXT_RE.search(joined))
+                for item in res:
+                    txt = str(item[1]).strip()
+                    conf = float(item[2])
+                    for m in _DENOM_RE.finditer(txt):
+                        denom = int(m.group(1))
+                        if denom in SUPPORTED_INR_DENOMINATIONS:
+                            score = min(0.96, conf if has_context else conf * 0.90)
+                            found.append(
+                                CurrencyNoteCandidate(
+                                    denomination_inr=denom,
+                                    confidence=round(score, 3),
+                                    box=box,
+                                    track_id=f"ocr-{denom}",
+                                )
+                            )
+                if found:
+                    return found
+        return found
+
+    def _classify_crop_hsv(
+        self,
+        img: Image.Image,
+        box: BoundingBox,
+        track_id: str,
+        allow_grey_500: bool,
+    ) -> CurrencyNoteCandidate | None:
+        w, h = img.size
+        # Trim 15% from each edge to reduce finger/background contamination
+        bw = box.x2 - box.x1
+        bh = box.y2 - box.y1
+        ix1 = box.x1 + 0.15 * bw
+        iy1 = box.y1 + 0.15 * bh
+        ix2 = box.x2 - 0.15 * bw
+        iy2 = box.y2 - 0.15 * bh
+        crop = img.crop(
+            (
+                max(0, int(ix1 * w)),
+                max(0, int(iy1 * h)),
+                min(w, int(ix2 * w)),
+                min(h, int(iy2 * h)),
+            )
+        )
+        if crop.width < 12 or crop.height < 12:
+            return None
+
+        arr = np.asarray(crop.resize((64, 48), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+        if float(arr.std()) < 0.045:
+            return None
+
+        med_rgb = np.median(arr, axis=(0, 1))
+        r, g, b = float(med_rgb[0]), float(med_rgb[1]), float(med_rgb[2])
+        rgb_sum = r + g + b
+        if rgb_sum < 0.15:
+            return None
+
+        rgb_ratio = np.asarray([r / rgb_sum, g / rgb_sum, b / rgb_sum], dtype=np.float32)
+        rr, rg, rb = float(rgb_ratio[0]), float(rgb_ratio[1]), float(rgb_ratio[2])
+        hue, sat, _ = _rgb_to_hsv_deg(r, g, b)
+
         best_denom = 0
-        best_dist = 999.0
-        for denom, proto in _INR_COLOR_PROFILES.items():
-            dist = float(np.linalg.norm(mean_rgb - np.asarray(proto, dtype=np.float32)))
-            if dist < best_dist:
-                best_dist = dist
+        best_score = 0.0
+
+        for denom, prof in _INR_PROFILES.items():
+            if denom == 500 and not allow_grey_500:
+                continue
+            proto_ratio = np.asarray(prof["rgb_ratio"], dtype=np.float32)
+            ratio_dist = float(np.linalg.norm(rgb_ratio - proto_ratio))
+            score = max(0.0, 1.0 - (ratio_dist / 0.14))
+
+            h_lo, h_hi = prof["hue"]
+            if denom == 500:
+                if sat > 0.10 or rb > rg + 0.015:
+                    score *= 0.45
+            elif denom == 100:
+                # Lavender: Blue is noticeably higher than Green (violet/lavender)
+                if (rb > rg + 0.015 and rb > rr - 0.02) or (
+                    h_lo <= hue <= h_hi and sat >= prof["min_sat"] and rb > rg
+                ):
+                    score = min(0.95, score + 0.22)
+                else:
+                    score *= 0.55
+            elif denom == 50:
+                # Cyan-blue: Green is strong alongside Blue, Red is low
+                if h_lo <= hue <= h_hi and sat >= prof["min_sat"] and rg >= rb * 0.90:
+                    score = min(0.95, score + 0.18)
+                else:
+                    score *= 0.55
+            else:
+                if h_lo <= hue <= h_hi and sat >= prof["min_sat"]:
+                    score = min(0.95, score + 0.18)
+                elif sat < prof["min_sat"]:
+                    score *= 0.60
+
+            if score > best_score:
+                best_score = score
                 best_denom = denom
 
-        # Convert color distance to a conservative confidence score
-        confidence = max(0.0, min(0.95, 1.0 - (best_dist / 0.45)))
-        if best_denom not in SUPPORTED_INR_DENOMINATIONS or confidence < 0.45:
-            return []
+        if best_denom not in SUPPORTED_INR_DENOMINATIONS or best_score < 0.55:
+            return None
 
-        return [
-            CurrencyNoteCandidate(
-                denomination_inr=best_denom,
-                confidence=round(confidence, 3),
-                box=BoundingBox(x1=0.18, y1=0.20, x2=0.82, y2=0.78),
-                track_id="center-note",
-            )
-        ]
+        return CurrencyNoteCandidate(
+            denomination_inr=best_denom,
+            confidence=round(best_score, 3),
+            box=box,
+            track_id=track_id,
+        )
 
     @staticmethod
     def _deduplicate_candidates(

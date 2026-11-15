@@ -444,7 +444,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/vision/currency")
     def analyze_currency() -> dict[str, Any]:
         frame = _require_frame()
-        res = c.currency.analyze([frame])
+        # Use detector boxes (e.g. 'book' / rectangular held objects) as priority note crops
+        detections = c.detector.detect(frame)
+        candidate_boxes = [
+            d.box for d in detections if d.label in ("book", "cell phone", "remote", "handbag")
+        ]
+        res = c.currency.analyze([frame], candidate_boxes=candidate_boxes or None)
         spoken = f"{res.guidance} {res.authenticity_disclaimer}"
         c.last_spoken_response = spoken
         return {
